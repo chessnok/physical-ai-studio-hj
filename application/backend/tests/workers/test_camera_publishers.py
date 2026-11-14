@@ -120,7 +120,9 @@ def test_publishers_are_recorded_and_stopped_with_the_backend(publishers, device
     camera.connect()
     pid = _pid(publishers, device)
     record = json.loads((tmp_path / "publishers" / f"{pid}.json").read_text())
+    started, owner_started = record.pop("started"), record.pop("owner_started")
     assert record == {"pid": pid, "owner": os.getpid(), "service": camera.service_name}
+    assert started > owner_started > 0  # start times tell a reused pid apart
 
     camera.disconnect()
     publishers.stop_all()
@@ -142,3 +144,93 @@ def test_a_new_backend_stops_the_publishers_a_killed_one_left_behind(publishers,
     assert restarted.sweep_orphans() == [pid]
     assert not _is_publisher_process(pid)
     assert not record.exists()
+
+
+def test_only_recorded_publishers_of_a_dead_backend_are_swept(publishers, device, tmp_path) -> None:
+    from physicalai.capture.transport._publisher import CameraPublisher
+    from physicalai.capture.transport._spec import CameraPublisherConfig
+
+    # A publisher another program started: unrecorded, so never touched, whatever its parent.
+    foreign = CameraPublisher(
+        CameraPublisherConfig(camera=Config(CLASS_PATH, {"serial_number": device, "width": 64, "height": 48})),
+        f"physicalai/camera/FakeCamera/{device}-foreign/frame",
+        idle_timeout=5.0,
+    )
+    foreign.start()
+    try:
+        pid = foreign._process.pid
+        records = tmp_path / "publishers"
+        records.mkdir(parents=True, exist_ok=True)
+        # A record whose pid was reused by another process: its start time does not match.
+        (records / f"{pid}.json").write_text(
+            json.dumps({"pid": pid, "started": 1.0, "owner": 2**22 + 1, "owner_started": 1.0, "service": "x"})
+        )
+        assert CameraPublishers(records_dir=records).sweep_orphans() == []
+        assert _is_publisher_process(pid)
+        assert not (records / f"{pid}.json").exists()  # the stale record is dropped
+    finally:
+        foreign.stop()
+
+
+def test_connecting_never_starts_an_untracked_publisher(publishers, device) -> None:
+    from physicalai.capture.errors import CaptureTimeoutError
+
+    camera = _camera(publishers, device, 64)
+    # The publisher Studio started exits before the camera subscribes, every time.
+    publishers.ensure = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    publishers.restart = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    with pytest.raises(CaptureTimeoutError):
+        camera.connect(timeout=1.0)
+    assert camera._publisher is None  # the base class did not start one of its own
+    assert camera._camera is not None  # and the recipe is kept, for settings checks
+
+
+def test_a_publisher_with_other_settings_is_refused_when_validating(publishers, device) -> None:
+    from physicalai.capture.errors import CaptureError
+
+    running = _camera(publishers, device, 64)
+    running.connect()
+    try:
+        other = _camera(publishers, device, 80)
+        # As if Studio's registry had not replaced it (another program's publisher, say).
+        publishers.ensure = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        with pytest.raises(CaptureError, match="does not match"):
+            other.connect(timeout=3.0)
+    finally:
+        running.disconnect()
+
+
+def test_of_two_waiting_setting_changes_the_newer_wins(publishers, device) -> None:
+    import threading
+
+    first = _camera(publishers, device, 64)
+    first.connect()
+    try:
+        # Two quick changes while the device is busy: 80 is asked for, then 96. Whichever thread
+        # gets the lock first, the camera ends with 96 and the stale request for 80 is refused.
+        lock = publishers._lock(device)
+        lock.acquire()
+        results: dict[int, str] = {}
+
+        def change(width: int) -> None:
+            camera = _camera(publishers, device, width)
+            try:
+                camera.connect(timeout=3)
+                results[width] = "connected"
+                camera.disconnect()
+            except CameraBusyError:
+                results[width] = "refused"
+
+        stale = threading.Thread(target=change, args=(80,))
+        stale.start()
+        time.sleep(0.2)
+        newer = threading.Thread(target=change, args=(96,))
+        newer.start()
+        time.sleep(0.2)
+        lock.release()
+        stale.join(10)
+        newer.join(10)
+        assert results == {80: "refused", 96: "connected"}
+        assert publishers._running[device].recipe["init_args"]["width"] == 96
+    finally:
+        first.disconnect()

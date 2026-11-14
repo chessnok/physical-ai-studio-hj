@@ -143,9 +143,3 @@ def test_dataset():
 
 # Loaded after this module, so after STORAGE_DIR is set above.
 pytest_plugins = ["tests.runtime_session.fixtures"]
-
-
-@pytest.fixture(autouse=True)
-def _no_camera_publisher_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The app's startup stops orphaned camera publishers: never this machine's real ones in tests."""
-    monkeypatch.setattr("utils.camera_publishers._orphan_publisher_pids", list)

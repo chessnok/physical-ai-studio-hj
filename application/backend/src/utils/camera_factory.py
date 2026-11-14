@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 from physicalai.capture import CameraType, ColorMode, SharedCamera
-from physicalai.capture.errors import CaptureTimeoutError
+from physicalai.capture.errors import CaptureError, CaptureTimeoutError
 from physicalai.config import Config
 
 from utils.camera_publishers import CameraPublishers, camera_publishers
@@ -180,10 +180,33 @@ class StudioSharedCamera(SharedCamera):
             self.device, self.service_name, recipe, idle_timeout=idle_timeout, replace=self.replace_settings
         )
         try:
-            super().connect(timeout)
+            self._attach(recipe, timeout)
         except CaptureTimeoutError:
             publishers.restart(self.device, self.service_name, recipe, idle_timeout=idle_timeout)
+            self._attach(recipe, timeout)
+
+    def _attach(self, recipe: Config, timeout: float) -> None:
+        """Subscribe to the publisher Studio started, then check its settings.
+
+        Attach-only: with no recipe, the base class never starts a publisher of its own, which it
+        would if the one Studio started exited in between, untracked and holding the camera.
+
+        Raises:
+            CaptureTimeoutError: No frame within ``timeout``.
+            CaptureError: The publisher's settings do not match and ``validate_on_connect`` is set.
+        """
+        self._camera = None
+        try:
             super().connect(timeout)
+        except CaptureError:
+            raise
+        except Exception as error:  # iceoryx2: the service is gone with its publisher
+            self._do_disconnect()
+            raise CaptureTimeoutError(f"No publisher serves {self.service_name}: {error!r}") from error
+        finally:
+            self._camera = recipe
+        if self._last_header is not None:
+            self._negotiate_config(self._last_header, timeout=timeout)
 
 
 def build_shared_camera(

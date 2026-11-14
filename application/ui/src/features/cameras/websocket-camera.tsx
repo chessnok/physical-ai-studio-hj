@@ -22,12 +22,14 @@ export const useCameraSocket = (camera: SchemaProjectCamera) => {
             }),
         },
         share: true,
-        shouldReconnect: () => error === null,
+        // Also after an error: the backend closes a preview whose camera stalled, and a new socket
+        // starts a fresh publisher. The error shows until a frame arrives.
+        shouldReconnect: () => true,
         reconnectAttempts: 5,
         reconnectInterval: 3000,
-        onOpen: () => setError(null),
         onMessage: (event: MessageEvent) => {
             if (event.data instanceof Blob) {
+                setError(null);
                 listeners.forEach((listener) => listener(event.data));
                 return;
             }

@@ -18,8 +18,8 @@ So this backend starts every publisher itself, one per camera device, with exact
 settings asked for: a request with other settings stops the running publisher and waits
 for it to release the device before starting the new one; a publisher that died, or does
 not deliver, is replaced; and every publisher is stopped when the backend shuts down.
-Each one is recorded on disk, so a backend that starts after one was killed stops what
-it left behind.
+Each one is recorded on disk with its start time, so a backend that starts after one was
+killed stops what it left behind, and nothing else.
 """
 
 from __future__ import annotations
@@ -84,6 +84,8 @@ class CameraPublishers:
     _running: dict[str, _Publisher] = field(default_factory=dict)
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
     _guard: threading.Lock = field(default_factory=threading.Lock)
+    _requests: dict[str, tuple[int, str, dict[str, Any]]] = field(default_factory=dict)
+    """The newest request per device: its number, service and recipe."""
 
     def _lock(self, device: str) -> threading.Lock:
         with self._guard:
@@ -107,7 +109,18 @@ class CameraPublishers:
             CaptureError: The publisher could not open the camera.
         """
         recipe = camera.to_dict()
+        with self._guard:
+            number = self._requests.get(device, (0, "", {}))[0] + 1
+            self._requests[device] = (number, service_name, recipe)
         with self._lock(device):
+            newest, newest_service, newest_recipe = self._requests[device]
+            if number != newest and (newest_service, newest_recipe) != (service_name, recipe):
+                # Settings changed again while this request waited (a camera form clicked through
+                # quickly): the newer request wins, rather than whichever thread got the lock last.
+                raise CameraBusyError(
+                    f"Camera {device} was asked for {_describe(newest_recipe)} after this request for "
+                    f"{_describe(recipe)}; the newer settings win."
+                )
             running = self._running.get(device)
             if running is not None and running.alive:
                 if running.service_name == service_name and running.recipe == recipe:
@@ -143,38 +156,46 @@ class CameraPublishers:
                 self._stop(device)
 
     def sweep_orphans(self) -> list[int]:
-        """Stop the publishers that programs which are gone left behind. Returns their pids.
+        """Stop the publishers a Studio backend started and left behind when it was killed. Returns their pids.
 
-        Those this backend's predecessors recorded, and any other publisher process that outlived
-        the program that started it: it holds its camera, and its dead subscribers keep it from
-        ever going idle. Publishers of live programs are left alone.
+        Only publishers recorded in :attr:`records_dir` by a backend that is gone: a process is
+        matched by pid *and* start time, so a reused pid is never mistaken for one. Publishers of
+        other programs, which their own subscribers may still use, are never touched.
         """
-        stopped = _orphan_publisher_pids()
-        for pid in stopped:
-            _terminate(pid)
-        if self.records_dir is not None and self.records_dir.is_dir():
-            stopped += self._sweep_records()
+        stopped: list[int] = []
+        for record_path, record in self._records():
+            if _same_process(record["owner"], record.get("owner_started")) and record["owner"] != os.getpid():
+                continue  # a live backend's publisher
+            if _same_process(record["pid"], record.get("started")) and _is_publisher_process(record["pid"]):
+                _terminate(record["pid"])
+                stopped.append(record["pid"])
+            record_path.unlink(missing_ok=True)
         if stopped:
             logger.warning("Stopped camera publishers left behind by a backend that is gone: {}", stopped)
             _cleanup_dead_nodes()
         return stopped
 
-    def _sweep_records(self) -> list[int]:
-        stopped: list[int] = []
-        for record_path in cast("Path", self.records_dir).glob("*.json"):
+    def _records(self) -> list[tuple[Path, dict[str, Any]]]:
+        """The recorded publishers; unreadable records are removed."""
+        if self.records_dir is None or not self.records_dir.is_dir():
+            return []
+        records = []
+        for record_path in self.records_dir.glob("*.json"):
             try:
                 record = json.loads(record_path.read_text())
-                pid, owner = int(record["pid"]), int(record["owner"])
+                record["pid"], record["owner"] = int(record["pid"]), int(record["owner"])
             except (OSError, ValueError, KeyError, TypeError):
                 record_path.unlink(missing_ok=True)
                 continue
-            if owner != os.getpid() and _process_alive(owner):
-                continue  # another live backend's publisher
-            if _is_publisher_process(pid):
-                _terminate(pid)
-                stopped.append(pid)
-            record_path.unlink(missing_ok=True)
-        return stopped
+            records.append((record_path, record))
+        return records
+
+    def _left_behind(self, pid: int) -> bool:
+        """Whether ``pid`` is a publisher a Studio backend that is gone started, as recorded."""
+        for _path, record in self._records():
+            if record["pid"] == pid and _same_process(pid, record.get("started")):
+                return not _same_process(record["owner"], record.get("owner_started"))
+        return False
 
     def _start(self, device: str, service_name: str, camera: Config, recipe: dict, idle_timeout: float) -> None:
         from physicalai.capture.transport._publisher import CameraPublisher
@@ -203,7 +224,7 @@ class CameraPublishers:
             CameraBusyError: A publisher that a live process started serves it.
         """
         for pid in _publisher_pids(service_name):
-            if _is_orphan(pid):
+            if self._left_behind(pid):
                 logger.warning(
                     "Stopping camera publisher {} of {}, left behind by a backend that is gone", pid, service_name
                 )
@@ -218,7 +239,13 @@ class CameraPublishers:
         if self.records_dir is None or running.pid is None:
             return
         self.records_dir.mkdir(parents=True, exist_ok=True)
-        record = {"pid": running.pid, "owner": os.getpid(), "service": running.service_name}
+        record = {
+            "pid": running.pid,
+            "started": _start_time(running.pid),
+            "owner": os.getpid(),
+            "owner_started": _start_time(os.getpid()),
+            "service": running.service_name,
+        }
         (self.records_dir / f"{running.pid}.json").write_text(json.dumps(record))
 
 
@@ -252,24 +279,24 @@ def _is_publisher_process(pid: int) -> bool:
     return PUBLISHER_MODULE in _cmdline(pid)
 
 
-def _is_orphan(pid: int) -> bool:
-    """Whether the publisher process ``pid`` outlived the program that started it.
-
-    A publisher runs in its own session, so when its program exits it is adopted by init or a
-    session manager, which is not a Python program like the ones that start publishers.
-    """
+def _start_time(pid: int) -> float | None:
+    """When process ``pid`` started, which tells it apart from a later process that got its pid."""
     import psutil
 
     try:
-        parent = psutil.Process(pid).parent()
+        return float(psutil.Process(pid).create_time())
     except (psutil.Error, OSError):
+        return None
+
+
+def _same_process(pid: int, started: float | None) -> bool:
+    """Whether ``pid`` is alive and is the process that started at ``started`` (if known)."""
+    if not _process_alive(pid):
         return False
-    if parent is None:
+    if started is None:
         return True
-    try:
-        return "python" not in os.path.basename(parent.exe() or parent.name()).lower()
-    except (psutil.Error, OSError):
-        return "python" not in parent.name().lower()
+    now = _start_time(pid)
+    return now is not None and abs(now - started) < 0.01
 
 
 def _terminate(pid: int, timeout: float = _STOP_TIMEOUT_S) -> bool:
@@ -289,21 +316,6 @@ def _terminate(pid: int, timeout: float = _STOP_TIMEOUT_S) -> bool:
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
     return True
-
-
-def _orphan_publisher_pids() -> list[int]:
-    """Publisher processes of this user that outlived the program that started them."""
-    import psutil
-
-    pids = []
-    for process in psutil.process_iter(["pid", "cmdline", "uids"]):
-        try:
-            mine = process.info["uids"].real == os.getuid()
-            if mine and PUBLISHER_MODULE in (process.info["cmdline"] or []) and _is_orphan(process.pid):
-                pids.append(process.pid)
-        except (psutil.Error, OSError, AttributeError):
-            continue
-    return pids
 
 
 def _publisher_pids(service_name: str) -> set[int]:
