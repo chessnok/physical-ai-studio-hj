@@ -27,7 +27,7 @@ export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
         robots !== '' ? `${robots} joints` : 'no joints',
     ];
     const warnings = (snapshot.warnings ?? []).length > 0 ? ` ${(snapshot.warnings ?? []).join(' ')}` : '';
-    const kind = snapshot.defective ? 'Defective' : 'Good';
+    const kind = snapshot.defective == null ? 'Unlabelled' : snapshot.defective ? 'Defective' : 'Good';
     const comment = snapshot.comment ? ` "${snapshot.comment}"` : '';
     return `${kind} snapshot${comment} saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
 };

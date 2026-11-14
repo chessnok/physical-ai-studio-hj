@@ -358,32 +358,48 @@ describe('StateSnapshotControls', () => {
     });
 });
 
+/** Serves the recent list from `initial` and applies PATCHes to it (or fails them); returns what was asked. */
+const mockRecent = (initial: SchemaStateSnapshot[], { failPatches = false } = {}) => {
+    let listed = initial;
+    const listRequests: URL[] = [];
+    const patches: { snapshot_id: string; body: unknown }[] = [];
+    server.use(
+        http.get('/api/projects/{project_id}/state_snapshots', ({ request }) => {
+            listRequests.push(new URL(request.url));
+            return HttpResponse.json(listed);
+        }),
+        http.patch('/api/projects/{project_id}/state_snapshots/{snapshot_id}', async ({ request, params }) => {
+            const body = (await request.json()) as Partial<SchemaStateSnapshot>;
+            patches.push({ snapshot_id: String(params.snapshot_id), body });
+            if (failPatches) {
+                return HttpResponse.json(
+                    { message: 'No space left on device', error_code: 'internal_error' },
+                    { status: 500 }
+                ) as never;
+            }
+            listed = listed.map((item) => (item.snapshot_id === params.snapshot_id ? { ...item, ...body } : item));
+            return HttpResponse.json(listed.find((item) => item.snapshot_id === params.snapshot_id) ?? listed[0]);
+        })
+    );
+    return { listRequests, patches };
+};
+
+const openRecent = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByRole('button', { name: 'Recent' }));
+    return screen.findByRole('dialog');
+};
+
 describe('recent snapshots', () => {
     it('lists the latest, changes their labels and downloads the CSV', async () => {
         mockSettings();
         const requests = mockCapture();
-        let listed: SchemaStateSnapshot[] = [{ ...SNAPSHOT, comment: 'old' }];
-        const listRequests: URL[] = [];
-        const patches: { snapshot_id: string; body: unknown }[] = [];
-        server.use(
-            http.get('/api/projects/{project_id}/state_snapshots', ({ request }) => {
-                listRequests.push(new URL(request.url));
-                return HttpResponse.json(listed);
-            }),
-            http.patch('/api/projects/{project_id}/state_snapshots/{snapshot_id}', async ({ request, params }) => {
-                const body = (await request.json()) as Partial<SchemaStateSnapshot>;
-                patches.push({ snapshot_id: String(params.snapshot_id), body });
-                listed = listed.map((item) => (item.snapshot_id === params.snapshot_id ? { ...item, ...body } : item));
-                return HttpResponse.json(listed[0]);
-            })
-        );
+        const { listRequests, patches } = mockRecent([{ ...SNAPSHOT, comment: 'old' }]);
         const open = rs.spyOn(window, 'open').mockReturnValue(null);
         const user = userEvent.setup();
         render(<Controls />);
 
-        await user.click(screen.getByRole('button', { name: 'Recent' }));
-        const dialog = await screen.findByRole('dialog');
-        const toggle = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00' });
+        const dialog = await openRecent(user);
+        const toggle = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' });
         expect(listRequests[0].searchParams.get('limit')).toBe('8');
         expect(toggle).not.toBeChecked();
 
@@ -393,7 +409,7 @@ describe('recent snapshots', () => {
         );
         await waitFor(() => expect(toggle).toBeChecked());
 
-        const field = within(dialog).getByRole('textbox', { name: 'Comment, snapshot of 17:15:00' });
+        const field = within(dialog).getByRole('textbox', { name: 'Comment, snapshot of 17:15:00.123' });
         expect(field).toHaveValue('old');
         await user.clear(field);
         await user.type(field, 'dent, fixed{Enter}');
@@ -407,6 +423,103 @@ describe('recent snapshots', () => {
             '_blank',
             'noopener,noreferrer'
         );
+    });
+
+    it('captures on Space after a switch in the list was toggled, without flipping it back', async () => {
+        mockSettings();
+        const requests = mockCapture();
+        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
+        const { patches } = mockRecent([SNAPSHOT]);
+        const user = userEvent.setup();
+        render(<Controls />);
+
+        const dialog = await openRecent(user);
+        const toggle = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' });
+        await user.click(toggle);
+        await waitFor(() => expect(toggle).toBeChecked());
+        expect(toggle).toHaveFocus(); // where a click leaves it, in the popover
+
+        await user.keyboard(' ');
+
+        await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
+        expect(requests).toHaveLength(1);
+        await settle();
+        expect(patches).toEqual([{ snapshot_id: SNAPSHOT.snapshot_id, body: { defective: true } }]);
+        expect(toggle).toBeChecked();
+    });
+
+    it('shows a snapshot from before labels as unlabelled, to label as good or defective', async () => {
+        mockSettings();
+        const { patches } = mockRecent([
+            { ...SNAPSHOT, defective: null },
+            { ...SNAPSHOT, snapshot_id: '20261113-171459-001', defective: null },
+        ]);
+        const user = userEvent.setup();
+        render(<Controls />);
+
+        const dialog = await openRecent(user);
+        await within(dialog).findByRole('button', { name: 'Good, snapshot of 17:15:00.123' });
+        expect(within(dialog).getAllByText('Unlabelled')).toHaveLength(2);
+        expect(within(dialog).queryByRole('switch')).not.toBeInTheDocument();
+
+        await user.click(within(dialog).getByRole('button', { name: 'Good, snapshot of 17:15:00.123' }));
+        const good = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' });
+        expect(good).not.toBeChecked();
+        await user.click(within(dialog).getByRole('button', { name: 'Defective, snapshot of 17:14:59.001' }));
+        const bad = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:14:59.001' });
+        await waitFor(() => expect(bad).toBeChecked());
+
+        expect(patches).toEqual([
+            { snapshot_id: SNAPSHOT.snapshot_id, body: { defective: false } },
+            { snapshot_id: '20261113-171459-001', body: { defective: true } },
+        ]);
+        expect(within(dialog).queryByText('Unlabelled')).not.toBeInTheDocument();
+    });
+
+    it('shows what the backend has after a change failed', async () => {
+        mockSettings();
+        const { listRequests, patches } = mockRecent([SNAPSHOT], { failPatches: true });
+        const notify = rs.spyOn(toast, 'negative').mockReturnValue(rs.fn());
+        const user = userEvent.setup();
+        render(<Controls />);
+
+        const dialog = await openRecent(user);
+        const toggle = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' });
+        expect(listRequests).toHaveLength(1);
+        await user.click(toggle);
+
+        await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
+        expect(notify.mock.calls[0][0]).toContain('No space left on device');
+        await waitFor(() => expect(listRequests).toHaveLength(2)); // fetched again
+        expect(patches).toHaveLength(1);
+        expect(toggle).not.toBeChecked();
+    });
+
+    it('keeps Enter and Escape in the open list from the recording hotkeys; Escape drops a comment edit', async () => {
+        mockSettings();
+        const { patches } = mockRecent([{ ...SNAPSHOT, comment: 'old' }]);
+        const startEpisode = rs.fn();
+        const discardEpisode = rs.fn();
+        const user = userEvent.setup();
+        render(
+            <Controls>
+                <RecordingHotkeys start={startEpisode} discard={discardEpisode} />
+            </Controls>
+        );
+
+        const dialog = await openRecent(user);
+        const field = await within(dialog).findByRole('textbox', { name: 'Comment, snapshot of 17:15:00.123' });
+        dialog.focus();
+        await user.keyboard('{Enter}');
+        expect(startEpisode).not.toHaveBeenCalled();
+
+        await user.type(field, ' edited');
+        await user.keyboard('{Escape}');
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+        await settle();
+
+        expect(discardEpisode).not.toHaveBeenCalled();
+        expect(patches).toEqual([]); // the edit was dropped, not saved
     });
 });
 
@@ -428,6 +541,7 @@ describe('readSnapshotLabel', () => {
 describe('describeSnapshot', () => {
     it('says how the snapshot is labelled', () => {
         expect(describeSnapshot(SNAPSHOT)).toMatch(/^Good snapshot saved to /);
+        expect(describeSnapshot({ ...SNAPSHOT, defective: null })).toMatch(/^Unlabelled snapshot saved to /);
         expect(describeSnapshot({ ...SNAPSHOT, defective: true, comment: 'dent' })).toMatch(
             /^Defective snapshot "dent" saved to /
         );

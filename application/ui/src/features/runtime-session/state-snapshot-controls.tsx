@@ -16,6 +16,7 @@ import {
     toast,
     View,
 } from '@geti-ui/ui';
+import { useQueryClient } from '@tanstack/react-query';
 
 import { $api, fetchClient } from '../../api/client';
 import { getApiErrorMessage } from '../../api/errors';
@@ -35,10 +36,45 @@ const isTextEntry = (target: EventTarget): boolean =>
     (target instanceof HTMLInputElement && TEXT_INPUT_TYPES.has(target.type)) ||
     (target instanceof HTMLElement && target.isContentEditable);
 
-/** "20261114-031439-950" -> "03:14:39", the snapshot's local capture time. */
+/** "20261114-031439-950" -> "03:14:39.950", the snapshot's local capture time ("-1" and so on kept). */
 export const snapshotTime = (snapshot_id: string): string => {
-    const match = /^\d{8}-(\d{2})(\d{2})(\d{2})-/.exec(snapshot_id);
-    return match === null ? snapshot_id : `${match[1]}:${match[2]}:${match[3]}`;
+    const match = /^\d{8}-(\d{2})(\d{2})(\d{2})-(\d{3})(-\d+)?$/.exec(snapshot_id);
+    return match === null ? snapshot_id : `${match[1]}:${match[2]}:${match[3]}.${match[4]}${match[5] ?? ''}`;
+};
+
+/**
+ * Keyboard handlers for an element inside which the capture hotkey (Space by default) always
+ * captures, except while typing: a focused switch or button there is neither flipped nor pressed,
+ * so that a label never changes by accident.
+ */
+const useCaptureKeys = (combo: string | undefined, capture: (() => void) | undefined) => {
+    const ref = useRef<HTMLDivElement>(null);
+
+    const isHotkey = (event: KeyboardEvent<HTMLDivElement>) =>
+        combo !== undefined &&
+        event.target instanceof Node &&
+        // Its own element only: the recent list's popover is a portal, with handlers of its own.
+        ref.current?.contains(event.target) === true &&
+        !isTextEntry(event.target) &&
+        keyboardEventToCombo(event.nativeEvent) === combo;
+    const onKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+        if (isHotkey(event)) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!event.repeat) {
+                capture?.();
+            }
+        }
+    };
+    // The browser activates a focused switch or button when Space is released.
+    const onKeyUpCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+        if (isHotkey(event)) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+    };
+
+    return { ref, onKeyDownCapture, onKeyUpCapture };
 };
 
 type TextFieldKeyHandler = NonNullable<ComponentProps<typeof TextField>['onKeyDown']>;
@@ -52,20 +88,13 @@ const leaveOnEnterOrEscape: TextFieldKeyHandler = (event) => {
     }
 };
 
-/** Enter leaves the field, which saves it; Escape closes the list without saving. */
-const leaveOnEnter: TextFieldKeyHandler = (event) => {
-    if (event.key === 'Enter') {
-        (event.target as HTMLElement).blur();
-    } else {
-        event.continuePropagation();
-    }
-};
-
-/** One recent snapshot, with its label to change. */
+/** One recent snapshot, with its label to change; one taken before labels existed has none yet. */
 const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot: SchemaStateSnapshot }) => {
-    const savedComment = snapshot.comment;
+    const queryClient = useQueryClient();
+    const savedComment = snapshot.comment ?? '';
     const [draft, setDraft] = useState(savedComment);
     const [shown, setShown] = useState(savedComment);
+    const isCancelled = useRef(false);
     // Adjusted while rendering: a comment saved elsewhere replaces the draft.
     if (shown !== savedComment) {
         setShown(savedComment);
@@ -86,29 +115,63 @@ const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot
                 onError: (error) => {
                     const reason = getApiErrorMessage(error) ?? 'the backend did not answer.';
                     toast.negative(`Could not change the snapshot of ${time}: ${reason}`, ERROR_TOAST);
+                    // Part of the change may have been saved: show what the backend has.
+                    void queryClient.invalidateQueries({ queryKey: snapshotListKey(project_id) });
                 },
             }
         );
     };
     const saveComment = () => {
-        if (draft.trim() !== savedComment) {
+        if (isCancelled.current) {
+            isCancelled.current = false;
+        } else if (draft.trim() !== savedComment) {
             update({ comment: draft });
         }
     };
-    const pendingDefective = isPending ? variables?.body?.defective : undefined;
+    // Enter leaves the field, which saves it; Escape drops the edit and closes the list.
+    const onCommentKeyDown: TextFieldKeyHandler = (event) => {
+        if (event.key === 'Enter') {
+            (event.target as HTMLElement).blur();
+            return;
+        }
+        if (event.key === 'Escape') {
+            isCancelled.current = true;
+            setDraft(savedComment);
+        }
+        event.continuePropagation();
+    };
+    const defective = (isPending ? variables?.body?.defective : undefined) ?? snapshot.defective ?? null;
 
     return (
         <Flex direction='column' gap='size-50'>
             <Flex alignItems='center' justifyContent='space-between' gap='size-100'>
                 <Text>{time}</Text>
-                <Switch
-                    isEmphasized
-                    isSelected={pendingDefective ?? snapshot.defective}
-                    onChange={(defective) => update({ defective })}
-                    aria-label={`Defective, snapshot of ${time}`}
-                >
-                    Defective
-                </Switch>
+                {defective === null ? (
+                    <Flex alignItems='center' gap='size-100'>
+                        <Text>Unlabelled</Text>
+                        <ActionButton
+                            onPress={() => update({ defective: false })}
+                            aria-label={`Good, snapshot of ${time}`}
+                        >
+                            Good
+                        </ActionButton>
+                        <ActionButton
+                            onPress={() => update({ defective: true })}
+                            aria-label={`Defective, snapshot of ${time}`}
+                        >
+                            Defective
+                        </ActionButton>
+                    </Flex>
+                ) : (
+                    <Switch
+                        isEmphasized
+                        isSelected={defective}
+                        onChange={(value) => update({ defective: value })}
+                        aria-label={`Defective, snapshot of ${time}`}
+                    >
+                        Defective
+                    </Switch>
+                )}
             </Flex>
             <TextField
                 aria-label={`Comment, snapshot of ${time}`}
@@ -116,7 +179,7 @@ const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot
                 value={draft}
                 onChange={setDraft}
                 onBlur={saveComment}
-                onKeyDown={leaveOnEnter}
+                onKeyDown={onCommentKeyDown}
                 maxLength={COMMENT_MAX_LENGTH}
             />
         </Flex>
@@ -124,6 +187,8 @@ const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot
 };
 
 const RecentSnapshotList = ({ project_id }: { project_id: string }) => {
+    const live = useStateSnapshot();
+    const keys = useCaptureKeys(live?.combo, live?.capture);
     const { data, isPending, error } = $api.useQuery('get', '/api/projects/{project_id}/state_snapshots', {
         params: { path: { project_id }, query: { limit: RECENT_SNAPSHOTS } },
     });
@@ -149,12 +214,15 @@ const RecentSnapshotList = ({ project_id }: { project_id: string }) => {
     }
 
     return (
-        <Flex direction='column' gap='size-200'>
-            {list}
-            <Button variant='secondary' onPress={downloadCsv}>
-                Download CSV of all snapshots
-            </Button>
-        </Flex>
+        // Space captures here too: after a switch here is clicked it keeps focus, and Space must not flip it back.
+        <div ref={keys.ref} onKeyDownCapture={keys.onKeyDownCapture} onKeyUpCapture={keys.onKeyUpCapture}>
+            <Flex direction='column' gap='size-200'>
+                {list}
+                <Button variant='secondary' onPress={downloadCsv}>
+                    Download CSV of all snapshots
+                </Button>
+            </Flex>
+        </div>
     );
 };
 
@@ -198,41 +266,20 @@ const RecentSnapshots = ({ project_id }: { project_id: string }) => {
  * which stays for a series and is remembered per project, a Capture button, and the recent snapshots.
  *
  * The capture hotkey (Space by default) captures with this label anywhere on the page except while
- * typing; within these controls it also does on the Defective switch and the buttons, instead of
- * flipping or pressing them, so that a label never changes by accident. Enter or Escape leaves the
+ * typing; within these controls and the recent list it also does on a switch or button, instead of
+ * flipping or pressing it, so that a label never changes by accident. Enter or Escape leaves the
  * comment field without reaching the page's other hotkeys, and clicking a control here gives focus
  * back to the page. Nothing is shown unless the session has an environment.
  */
 export const StateSnapshotControls = ({ layout = 'column' }: { layout?: 'column' | 'row' }) => {
     const snapshot = useStateSnapshot();
-    const controls = useRef<HTMLDivElement>(null);
+    const keys = useCaptureKeys(snapshot?.combo, snapshot?.capture);
+    const controls = keys.ref;
 
     if (snapshot === null) {
         return null;
     }
     const { project_id, label, setLabel, capture, isCapturing, combo } = snapshot;
-
-    const isHotkey = (event: KeyboardEvent<HTMLDivElement>) =>
-        event.target instanceof Node &&
-        controls.current?.contains(event.target) === true && // not the recent list's popover
-        !isTextEntry(event.target) &&
-        keyboardEventToCombo(event.nativeEvent) === combo;
-    const onKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
-        if (isHotkey(event)) {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!event.repeat) {
-                capture();
-            }
-        }
-    };
-    // The browser activates a focused switch or button when Space is released.
-    const onKeyUpCapture = (event: KeyboardEvent<HTMLDivElement>) => {
-        if (isHotkey(event)) {
-            event.preventDefault();
-            event.stopPropagation();
-        }
-    };
 
     // After a click on the switch or the button, focus goes back to the page, so that its hotkeys
     // (Enter, Escape) work at once instead of pressing that control again.
@@ -280,7 +327,7 @@ export const StateSnapshotControls = ({ layout = 'column' }: { layout?: 'column'
     const hint = `${formatKeyCombo(combo)} captures with this label, which stays for the next snapshots.`;
 
     return (
-        <div ref={controls} onKeyDownCapture={onKeyDownCapture} onKeyUpCapture={onKeyUpCapture}>
+        <div ref={controls} onKeyDownCapture={keys.onKeyDownCapture} onKeyUpCapture={keys.onKeyUpCapture}>
             {layout === 'row' ? (
                 <Flex direction='column' gap='size-50'>
                     <Flex alignItems='end' gap='size-200' wrap>
