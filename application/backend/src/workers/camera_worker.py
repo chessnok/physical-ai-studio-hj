@@ -28,12 +28,19 @@ def camera_image_spec(config: Camera) -> ImageSpec:
     return ImageSpec(height=config.payload.height or 480, width=config.payload.width or 640)
 
 
+def depth_downscale() -> int:
+    """By how much depth maps are decimated for recording (``DEPTH_RECORD_DOWNSCALE``)."""
+    from settings import get_settings
+
+    return get_settings().depth_record_downscale
+
+
 def camera_observations(key: str, config: Camera) -> dict[str, ImageSpec]:
     """The store slots a camera at ``key`` writes: its color image, its depth map, or both.
 
-    A RealSense camera's ``output_type`` picks them; its depth map is aligned to the color image,
-    so it has the same height and width, and is stored at :func:`depth_key`. Any other camera has
-    its color image only.
+    A RealSense camera's ``output_type`` picks them; its depth map, at :func:`depth_key`, is
+    aligned to the color image and decimated by :func:`depth_downscale`: depth pixel ``(u, v)``
+    is color pixel ``(s*u, s*v)``. Any other camera has its color image only.
     """
     color = camera_image_spec(config)
     if config.driver != "realsense":
@@ -43,7 +50,8 @@ def camera_observations(key: str, config: Camera) -> dict[str, ImageSpec]:
     if output_has_color(output_type):
         slots[key] = color
     if output_has_depth(output_type):
-        slots[depth_key(key)] = ImageSpec.depth(color.height, color.width)
+        scale = depth_downscale()
+        slots[depth_key(key)] = ImageSpec.depth(-(-color.height // scale), -(-color.width // scale))
     return slots
 
 
@@ -221,12 +229,17 @@ class CameraWorker(ThreadWorker[SharedCamera]):
 
 
 def _fit(image: np.ndarray, slot: ImageSpec) -> np.ndarray:
-    """``image`` at the slot's resolution: resized if the publisher runs at another one.
+    """``image`` at the slot's resolution: decimated for a depth slot, resized if the publisher runs at another one.
 
-    Depth is resized with nearest-neighbour, so no depth is invented between surfaces.
+    Depth is decimated or resized with nearest-neighbour, so every value is a measured one: no
+    depth is invented between surfaces.
     """
     if image.shape[:2] == slot.shape[:2]:
         return image
+    if slot.is_depth:
+        scale = -(-image.shape[0] // slot.height)
+        if image[::scale, ::scale].shape[:2] == slot.shape[:2]:
+            return np.ascontiguousarray(image[::scale, ::scale])
     size = (slot.width, slot.height)
     image = np.ascontiguousarray(image)  # a color view into an RGB-D frame is strided
     if not slot.is_depth:

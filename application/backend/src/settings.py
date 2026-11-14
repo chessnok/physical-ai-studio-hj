@@ -298,8 +298,14 @@ class Settings(BaseSettings):
     hotkeys: HotkeySettings = HotkeySettings()
     # User-configurable video encoding for dataset recordings.
     video_recording: VideoRecordingSettings = VideoRecordingSettings()
-    # Depth maps are recorded losslessly (about 0.5-1 GB per minute per 1280x720 camera at 30 fps).
-    # A CRF (e.g. 8) records them lossy instead: around 50x smaller, with errors near depth edges.
+    # Depth maps are recorded at 1/DEPTH_RECORD_DOWNSCALE of the color resolution: 1280x720 color
+    # gets 640x360 depth by default. Lossless 12-bit HEVC of full-resolution depth costs about 1.5
+    # CPU cores per 30 fps camera and does not keep up with two RealSense cameras next to the color
+    # encoders; at half resolution it costs a quarter of that. 1 records the full resolution.
+    depth_record_downscale: int = Field(default=2, ge=1, le=4, alias="DEPTH_RECORD_DOWNSCALE")
+    # Depth maps are recorded losslessly (about 100 MB per minute per 640x360 camera at 30 fps).
+    # A CRF (e.g. 8) records them lossy instead: far smaller, with errors near depth edges, where
+    # "0 = no depth" no longer holds exactly.
     depth_video_crf: int | None = Field(default=None, ge=0, le=51, alias="DEPTH_VIDEO_CRF")
 
     # Managed SSH trainers require a loopback-bound backend; see

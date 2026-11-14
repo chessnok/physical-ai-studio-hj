@@ -551,21 +551,21 @@ async def test_a_real_rgbd_recording_lands_in_the_dataset_with_depth_aligned_to_
     depth_feature = info["features"]["observation.images.top_depth"]
     assert color_feature["shape"] == [240, 424, 3]
     assert not color_feature["info"]["is_depth_map"]
-    assert depth_feature["shape"] == [240, 424, 1]
+    assert depth_feature["shape"] == [120, 212, 1]  # every other pixel of the aligned depth (DEPTH_RECORD_DOWNSCALE)
     assert depth_feature["info"]["is_depth_map"]
     assert depth_feature["info"]["depth_unit"] == "mm"
     assert depth_feature["info"]["video.pix_fmt"] == "gray12le"
     assert (depth_feature["info"]["video.depth_min"], depth_feature["info"]["video.depth_max"]) == (0.0, 10.0)
     assert dataset_spec(dataset).observations == {
         "top": ImageSpec(240, 424, 3),
-        "top_depth": ImageSpec.depth(240, 424),
+        "top_depth": ImageSpec.depth(120, 212),
     }
 
     lerobot = LeRobotDataset(str(uuid4()), root=dataset.path)
     item = lerobot[len(lerobot) // 2]
     depth = item["observation.images.top_depth"].numpy()[0]
-    expected = _expected_depth().astype(np.float32)
-    assert depth.shape == (240, 424)
+    expected = _expected_depth()[::2, ::2].astype(np.float32)
+    assert depth.shape == (120, 212)
     holes = expected == 0
     assert np.all(depth[holes] == 0)  # no data stays no data
     # Lossless 12-bit log quantization over 0-10 m: within one code, 1.4 mm at 3 m.

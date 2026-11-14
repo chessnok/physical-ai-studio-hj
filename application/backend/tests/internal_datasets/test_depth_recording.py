@@ -180,3 +180,44 @@ def test_an_rgb_dataset_has_no_depth_to_leave_out(tmp_path: Path) -> None:
     (tmp_path / "meta").mkdir()
     (tmp_path / "meta" / "info.json").write_text('{"features": {"observation.images.top": {"info": {}}}}')
     assert not _has_depth_features(tmp_path)
+
+
+def test_a_depth_encoder_that_falls_behind_is_caught(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """LeRobot's streaming encoder drops what it cannot encode; the recording must find out."""
+    import time
+
+    import lerobot.datasets.video_utils as video_utils
+
+    quantize = video_utils.quantize_depth
+
+    def slow_quantize(*args, **kwargs):
+        time.sleep(0.1)  # a depth encoder slower than 30 fps
+        return quantize(*args, **kwargs)
+
+    monkeypatch.setattr(video_utils, "quantize_depth", slow_quantize)
+    dataset = InternalLeRobotDataset(
+        tmp_path / "dataset",
+        recording_video_encoding_settings=VideoEncodingSettings(vcodec="libsvtav1", encoder_queue_maxsize=2),
+        access_mode=DatasetAccessMode.RECORDING_MUTATION,
+    )
+    dataset.create(fps=30, features=FEATURES, robot_type="test")
+    dataset.prepare_for_writing()
+    for frame in range(20):
+        dataset.add_frame(
+            {
+                "arm.pos": 0.0,
+                "gripper.pos": 1.0,
+                "top": np.zeros((HEIGHT, WIDTH, 3), np.uint8),
+                "top_depth": _depth(frame),
+            },
+            {"arm.pos": 0.0, "gripper.pos": 1.0},
+            "test",
+        )
+    assert dataset.dropped_video_frames().get("observation.images.top_depth", 0) > 0
+
+    # Saved anyway, the episode's depth video is shorter than its rows: that is caught too.
+    dataset.save_episode()
+    problems = dataset.last_episode_video_problems()
+    assert any(problem.startswith("top_depth:") and "for 20 rows" in problem for problem in problems)
+    assert not any(problem.startswith("top:") for problem in problems)
+    dataset.finalize()

@@ -49,6 +49,14 @@ class DatasetClient(ABC):
     def get_video_keys(self) -> list[str]:
         """Get the video keys used to record the dataset"""
 
+    def dropped_video_frames(self) -> dict[str, int]:
+        """Frames the video encoders dropped in the open episode, by video key."""
+        return {}
+
+    def last_episode_video_problems(self) -> list[str]:
+        """How the last saved episode's videos do not match its rows; empty when they do."""
+        return []
+
     def get_depth_keys(self) -> list[str]:
         """The video keys that hold depth maps rather than color images."""
         return []

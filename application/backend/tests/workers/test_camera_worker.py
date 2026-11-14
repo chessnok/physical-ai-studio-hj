@@ -303,16 +303,32 @@ class TestRealSenseCameraWorker:
     def test_both_writes_color_and_aligned_depth_with_one_timestamp(self, rgbd_store):
         color = np.full((6, 8, 3), 5, np.uint8)
         depth = np.full((6, 8), 1500, np.uint16)
-        depth[0, 0], depth[0, 1], depth[0, 2] = 0, 200, 3500  # no data, nearer and farther than the range
+        depth[0, 0], depth[0, 2], depth[0, 4] = 0, 200, 3500  # no data, nearer and farther than the range
+        depth[1::2, :] = 7  # rows the decimation skips
         _run_once(CameraWorker(_realsense_config(), rgbd_store, "top"), _rgbd_frame(color, depth))
 
         color_sample, depth_sample = rgbd_store.read_observation("top"), rgbd_store.read_observation("top_depth")
         assert color_sample.timestamp == depth_sample.timestamp == 4.0
         np.testing.assert_array_equal(color_sample.value, color)
         assert depth_sample.value.dtype == np.uint16
-        assert depth_sample.value.shape == (6, 8, 1)
+        # Decimated by DEPTH_RECORD_DOWNSCALE (2): depth pixel (u, v) is color pixel (2u, 2v), measured as it was.
+        assert depth_sample.value.shape == (3, 4, 1)
         assert depth_sample.value[0, :3, 0].tolist() == [0, 0, 0]  # outside 0.3-3 m is no data
         assert np.all(depth_sample.value[1:] == 1500)
+
+    def test_depth_can_be_recorded_at_full_resolution(self, monkeypatch):
+        from workers.camera_worker import camera_observations
+
+        monkeypatch.setattr("workers.camera_worker.depth_downscale", lambda: 1)
+        store = Store.create(FeatureSpec((), camera_observations("top", _realsense_config())), uuid.uuid4().hex)
+        try:
+            depth = np.arange(48, dtype=np.uint16).reshape(6, 8) + 1000
+            _run_once(
+                CameraWorker(_realsense_config(), store, "top"), _rgbd_frame(np.zeros((6, 8, 3), np.uint8), depth)
+            )
+            np.testing.assert_array_equal(store.read_observation("top_depth").value[..., 0], depth)
+        finally:
+            store.unlink()
 
     def test_depth_at_another_resolution_is_resized_without_inventing_depth(self, rgbd_store):
         depth = np.zeros((3, 4), np.uint16)

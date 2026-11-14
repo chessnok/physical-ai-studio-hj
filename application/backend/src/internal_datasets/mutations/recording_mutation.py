@@ -36,6 +36,14 @@ class RecordingMutation:
         """Discard current recording buffer."""
         self.cache_dataset.discard_buffer()
 
+    def dropped_frames(self) -> dict[str, int]:
+        """Frames the video encoders dropped in the open episode, by video key."""
+        return self.cache_dataset.dropped_video_frames()
+
+    def saved_episode_problems(self) -> list[str]:
+        """How the last saved episode's videos do not match its rows; empty when they do."""
+        return self.cache_dataset.last_episode_video_problems()
+
     def teardown(self) -> None:
         """If mutation exists apply and then remove cache."""
         logger.debug(f"Teardown recording mutation. Has mutation {self.has_mutation}")

@@ -17,6 +17,7 @@ loses the dataset, so the parent waits long for it (``stop_timeout_s``).
 
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -39,10 +40,16 @@ if TYPE_CHECKING:
 
 STATUS = "rpc/dataset/status"
 EVENTS = "evt/dataset"
-MIN_EPISODE_FRAMES = 2
-"""lerobot's streaming encoder gives a 1-frame episode no video stats; it saves, then closing the dataset fails."""
+MIN_EPISODE_FRAMES = 3
+"""lerobot's streaming encoder gives a 1-frame episode no video stats; it saves, then closing the dataset fails.
+And a depth video (libx265) of one or two frames often fails to mux into mp4."""
 PAIR_READS = 3
 """How often a color image and its depth map are read again when a camera wrote between the two reads."""
+MAX_LAG_S = 0.2
+"""How far an episode's rows may fall behind its clock before it is discarded.
+
+Rows are stamped ``frame_index / fps``: a tick that is missed (the computer could not keep up)
+shortens the episode's recorded time, so actions and frames would replay too fast."""
 
 
 class Empty(BaseModel):
@@ -70,7 +77,10 @@ class Recorder:
     skipped: int = 0
     frames: int = 0
     """In the open episode."""
+    fps: float | None = None
+    """The rate rows are recorded at; ``None`` skips the check that the episode keeps up with it."""
     _open: bool = field(default=False, repr=False)
+    _started_at: float = field(default=0.0, repr=False)
 
     def status(self, _request: Empty | None = None) -> RecordingStatus:
         return RecordingStatus(is_recording=self._open, episodes_recorded=self.episodes_recorded)
@@ -93,6 +103,9 @@ class Recorder:
                 f"The episode has {self.frames} frame(s), too short to save; it was discarded.",
                 error_code="episode_too_short",
             )
+        if (dropped := self._dropped_frames()) is not None:
+            self.discard(error=dropped)
+            raise RuntimeSessionCommandError(dropped, error_code="encoder_dropped_frames")
         try:
             self.mutation.save_episode()
         except Exception:
@@ -103,7 +116,40 @@ class Recorder:
             self._changed()  # not recording any more, whether or not the save landed
             raise
         self.episodes_recorded += 1
+        problems: object = getattr(self.mutation, "saved_episode_problems", list)()
+        if isinstance(problems, list) and problems:
+            # Should not happen with the checks above; if it does, the episode must not pass for a good one.
+            error = (
+                f"Episode {self.episodes_recorded} was saved, but its videos do not match its rows "
+                f"({'; '.join(problems)}). Delete it from the dataset before training on it."
+            )
+            logger.error(error)
+            return self._changed(error)
         return self._changed()
+
+    def _dropped_frames(self) -> str | None:
+        """Why the open episode cannot be kept because a video encoder dropped frames, or ``None``."""
+        dropped: object = getattr(self.mutation, "dropped_frames", dict)()
+        if not isinstance(dropped, dict) or not dropped:
+            return None
+        listed = ", ".join(f"{count} of {key.removeprefix('observation.images.')}" for key, count in dropped.items())
+        return (
+            f"Episode discarded: the video encoder could not keep up and dropped frames ({listed}), so its videos "
+            "would not line up with its rows. Record fewer or smaller cameras, or close previews, then start again."
+        )
+
+    def _fell_behind(self) -> str | None:
+        """Why the open episode cannot be kept because its rows fell behind its clock, or ``None``."""
+        if self.fps is None or self.frames == 0:
+            return None
+        lag = (time.monotonic() - self._started_at) - (self.frames - 1) / self.fps
+        if lag <= MAX_LAG_S:
+            return None
+        return (
+            f"Episode discarded: recording fell {lag * 1000:.0f} ms behind its {self.fps:g} fps clock (the computer "
+            "could not keep up), so it would replay too fast. Record fewer or smaller cameras, or close previews, "
+            "then start again."
+        )
 
     def discard(self, _request: DiscardEpisodeCommand | None = None, *, error: str | None = None) -> RecordingStatus:
         # Does not require an open episode: also how a too-short one is thrown away.
@@ -179,6 +225,11 @@ class Recorder:
             self._changed()
             return
         self.frames += 1
+        if self.frames == 1:
+            self._started_at = time.monotonic()
+        if (problem := self._dropped_frames() or self._fell_behind()) is not None:
+            logger.warning(problem)
+            self.discard(error=problem)
 
     def finish(self) -> None:
         """Discard an open episode, then copy the recording back over the dataset."""
@@ -225,7 +276,9 @@ class DatasetWorker(ProcessWorker[Recorder]):
         store = Store.attach(self.spec, self.store_name)
         try:
             with Bus.join(self.session_id) as bus:
-                recorder = Recorder(self.open_mutation(), store, publish=lambda status: bus.publish(EVENTS, status))
+                recorder = Recorder(
+                    self.open_mutation(), store, publish=lambda status: bus.publish(EVENTS, status), fps=self.fps
+                )
                 try:
                     bus.listen(status_key("environment/*"), StatusMessage, recorder.camera_status)
                     bus.serve(STATUS, Empty, recorder.status)

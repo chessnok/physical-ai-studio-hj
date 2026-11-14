@@ -124,8 +124,8 @@ export const RealsenseFormFields = () => {
             {hasDepth && (
                 <Text width='100%'>
                     Depth is recorded in millimetres as a camera of its own, named after this one with
-                    &quot;_depth&quot; appended, aligned to the color image. Depth outside this range is recorded as 0
-                    (no data).
+                    &quot;_depth&quot; appended, aligned to the color image and at half its resolution (every other
+                    pixel, so it keeps up at 30 fps). Depth outside this range is recorded as 0 (no data).
                 </Text>
             )}
         </Flex>

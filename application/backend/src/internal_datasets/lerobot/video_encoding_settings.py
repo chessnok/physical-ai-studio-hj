@@ -208,8 +208,13 @@ _USABLE_DEPTH_ENCODERS: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set(
 """Depth encoder configurations that encoded a frame; a failure is not remembered, so it is probed again."""
 
 
+PROBE_FRAMES = 4
+"""Frames a depth encoder probe encodes: libx265 streams of one or two frames fail to mux into mp4
+about half of the time (FFmpeg's ``PatchWelcomeError``), three or more never did in hundreds of runs."""
+
+
 def _is_depth_encoder_usable(vcodec: str, pix_fmt: str, options: tuple[tuple[str, str], ...]) -> bool:
-    """Probe a depth encoder configuration by encoding and muxing one 12-bit depth frame, in memory."""
+    """Probe a depth encoder configuration by encoding and muxing a few 12-bit depth frames, in memory."""
     import io
 
     import av
@@ -224,11 +229,12 @@ def _is_depth_encoder_usable(vcodec: str, pix_fmt: str, options: tuple[tuple[str
             if not isinstance(stream, av.VideoStream):
                 raise ValueError(f"Codec {vcodec!r} did not create a video stream")
             stream.pix_fmt = pix_fmt
-            stream.width, stream.height, stream.time_base = 320, 240, Fraction(1, 30)
-            frame = av.VideoFrame.from_ndarray(np.zeros((240, 320), dtype=np.uint16), format=pix_fmt)
-            frame.pts, frame.time_base = 0, Fraction(1, 30)
-            for packet in stream.encode(frame):
-                container.mux(packet)
+            stream.width, stream.height, stream.time_base = 64, 64, Fraction(1, 30)
+            for index in range(PROBE_FRAMES):
+                frame = av.VideoFrame.from_ndarray(np.full((64, 64), index, dtype=np.uint16), format=pix_fmt)
+                frame.pts, frame.time_base = index, Fraction(1, 30)
+                for packet in stream.encode(frame):
+                    container.mux(packet)
             for packet in stream.encode():
                 container.mux(packet)
     except Exception as exc:

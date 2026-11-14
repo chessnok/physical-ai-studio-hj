@@ -30,6 +30,11 @@ from settings import get_settings
 EpisodeMetadata = dict[str, Any]
 
 
+def _first(value: Any) -> Any:
+    """LeRobot keeps an episode's metadata as one-element lists while it is buffered."""
+    return value[0] if isinstance(value, list | tuple) else value
+
+
 class InternalLeRobotDataset(DatasetClient):
     type: str = "lerobot"
     path: Path
@@ -150,6 +155,28 @@ class InternalLeRobotDataset(DatasetClient):
 
     def get_video_keys(self) -> list[str]:
         return list(self._dataset.meta.video_keys)
+
+    def dropped_video_frames(self) -> dict[str, int]:
+        # LeRobot's streaming encoder drops a frame (with a warning) when its queue is full.
+        encoder = getattr(self._dataset.writer, "_streaming_encoder", None) if self._dataset.writer else None
+        dropped = getattr(encoder, "_dropped_frames", None) or {}
+        return {key: count for key, count in dropped.items() if count}
+
+    def last_episode_video_problems(self) -> list[str]:
+        meta = self._dataset.meta
+        episode = meta.latest_episode
+        if not episode:
+            return []
+        length = int(_first(episode.get("length")) or 0)
+        problems = []
+        for key in meta.video_keys:
+            start, end = episode.get(f"videos/{key}/from_timestamp"), episode.get(f"videos/{key}/to_timestamp")
+            if start is None or end is None:
+                continue
+            frames = round((float(_first(end)) - float(_first(start))) * meta.fps)
+            if frames != length:
+                problems.append(f"{key.removeprefix('observation.images.')}: {frames} video frames for {length} rows")
+        return problems
 
     def get_depth_keys(self) -> list[str]:
         meta = self._dataset.meta

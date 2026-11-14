@@ -52,8 +52,8 @@ def test_camera_loss_between_recording_ticks_discards_the_episode(recorder, stat
 
     recorder.start(StartEpisodeCommand(request_id="restart", task="pick"))
     assert recorder.publish.call_args.args[0].error is None
-    recorder.record_frame()
-    recorder.record_frame()
+    for _ in range(3):
+        recorder.record_frame()
     assert recorder.save(SaveEpisodeCommand(request_id="save")).episodes_recorded == 2
 
 
@@ -124,3 +124,88 @@ def test_a_depth_only_camera_lost_between_ticks_discards_the_episode():
         recorder.mutation.discard_buffer.assert_called_once()
     finally:
         store.unlink()
+
+
+class _DroppingMutation(MagicMock):
+    """A recording whose video encoder drops frames once ``dropped`` is set."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dropped: dict[str, int] = {}
+        self.problems: list[str] = []
+
+    def dropped_frames(self) -> dict[str, int]:
+        return self.dropped
+
+    def saved_episode_problems(self) -> list[str]:
+        return self.problems
+
+
+@pytest.fixture
+def dropping_recorder():
+    store = Store.create(FeatureSpec((), {"top": ImageSpec(2, 2), "top_depth": ImageSpec.depth(2, 2)}), uuid4().hex)
+    for key in (STATE, ACTION):
+        store.write(key, [], timestamp=1.0)
+    store.write_observation("top", np.zeros((2, 2, 3), np.uint8), timestamp=1.0)
+    store.write_observation("top_depth", np.zeros((2, 2, 1), np.uint16), timestamp=1.0)
+    recorder = Recorder(_DroppingMutation(), store, publish=MagicMock(), fps=30)
+    recorder.start(StartEpisodeCommand(request_id="start", task="pick"))
+    yield recorder
+    store.unlink()
+
+
+def test_an_encoder_that_drops_frames_discards_the_episode_and_says_why(dropping_recorder):
+    recorder = dropping_recorder
+    recorder.record_frame()
+    assert recorder.status().is_recording
+    recorder.mutation.dropped = {"observation.images.top_depth": 3}
+
+    recorder.record_frame()
+
+    assert not recorder.status().is_recording
+    recorder.mutation.discard_buffer.assert_called_once()
+    error = recorder.publish.call_args.args[0].error
+    assert "dropped frames (3 of top_depth)" in error
+
+
+def test_an_episode_with_dropped_frames_is_not_saved(dropping_recorder):
+    recorder = dropping_recorder
+    for _ in range(3):
+        recorder.record_frame()
+    recorder.mutation.dropped = {"observation.images.top_depth": 1}
+
+    with pytest.raises(RuntimeSessionCommandError, match="could not keep up") as error:
+        recorder.save(SaveEpisodeCommand(request_id="save"))
+
+    assert error.value.error_code == "encoder_dropped_frames"
+    recorder.mutation.save_episode.assert_not_called()
+    recorder.mutation.discard_buffer.assert_called_once()
+
+
+def test_a_recording_that_falls_behind_its_clock_is_discarded(dropping_recorder, monkeypatch):
+    recorder = dropping_recorder
+    clock = [100.0]
+    monkeypatch.setattr("workers.dataset_worker.time.monotonic", lambda: clock[0])
+    recorder.record_frame()
+    for _ in range(5):  # on time: one row per 1/30 s
+        clock[0] += 1 / 30
+        recorder.record_frame()
+    assert recorder.status().is_recording
+
+    clock[0] += 0.5  # the computer stalled for half a second: 15 ticks missed
+
+    recorder.record_frame()
+    assert not recorder.status().is_recording
+    assert "behind its 30 fps clock" in recorder.publish.call_args.args[0].error
+
+
+def test_a_saved_episode_whose_videos_do_not_match_is_flagged(dropping_recorder):
+    recorder = dropping_recorder
+    for _ in range(3):
+        recorder.record_frame()
+    recorder.mutation.problems = ["top_depth: 2 video frames for 3 rows"]
+
+    status = recorder.save(SaveEpisodeCommand(request_id="save"))
+
+    assert status.episodes_recorded == 1
+    assert "do not match its rows (top_depth: 2 video frames for 3 rows)" in status.error

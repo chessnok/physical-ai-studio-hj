@@ -84,8 +84,8 @@ def _realsense_row(name: str, output_type: str) -> dict:
     ("output_type", "slots"),
     [
         ("color", {"top": ImageSpec(720, 1280)}),
-        ("depth", {"top_depth": ImageSpec.depth(720, 1280)}),
-        ("both", {"top": ImageSpec(720, 1280), "top_depth": ImageSpec.depth(720, 1280)}),
+        ("depth", {"top_depth": ImageSpec.depth(360, 640)}),
+        ("both", {"top": ImageSpec(720, 1280), "top_depth": ImageSpec.depth(360, 640)}),
     ],
 )
 async def test_a_realsense_camera_records_what_its_output_type_asks(
@@ -102,7 +102,7 @@ async def test_a_realsense_camera_records_what_its_output_type_asks(
     shown = description.session_environment().cameras[-1]
     assert shown.key == ("top_depth" if output_type == "depth" else "top")
     assert shown.depth_key == (None if output_type == "color" else "top_depth")
-    assert (shown.height, shown.width) == (720, 1280)
+    assert (shown.height, shown.width) == ((360, 640) if output_type == "depth" else (720, 1280))
 
 
 async def test_a_camera_named_like_another_ones_depth_is_refused(test_environment, factory) -> None:
