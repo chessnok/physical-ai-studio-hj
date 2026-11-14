@@ -388,7 +388,10 @@ describe('StateSnapshotControls', () => {
 });
 
 /** Serves the recent list from `initial` and applies PATCHes to it (or fails them); returns what was asked. */
-const mockRecent = (initial: SchemaStateSnapshot[], { failPatches = false } = {}) => {
+const mockRecent = (
+    initial: SchemaStateSnapshot[],
+    { failPatches = false, csvWarning = null as string | null } = {}
+) => {
     let listed = initial;
     const listRequests: URL[] = [];
     const patches: { snapshot_id: string; body: unknown }[] = [];
@@ -407,7 +410,8 @@ const mockRecent = (initial: SchemaStateSnapshot[], { failPatches = false } = {}
                 ) as never;
             }
             listed = listed.map((item) => (item.snapshot_id === params.snapshot_id ? { ...item, ...body } : item));
-            return HttpResponse.json(listed.find((item) => item.snapshot_id === params.snapshot_id) ?? listed[0]);
+            const changed = listed.find((item) => item.snapshot_id === params.snapshot_id) ?? listed[0];
+            return HttpResponse.json({ ...changed, csv_warning: csvWarning });
         })
     );
     return { listRequests, patches };
@@ -522,6 +526,26 @@ describe('recent snapshots', () => {
         await waitFor(() => expect(listRequests).toHaveLength(2)); // fetched again
         expect(patches).toHaveLength(1);
         expect(toggle).not.toBeChecked();
+    });
+
+    it('says when a change is saved but the CSV is not rewritten yet', async () => {
+        mockSettings();
+        const warning =
+            'The label is saved, but snapshots.csv could not be rewritten (No space left on device); ' +
+            'the next capture or CSV download brings it up to date.';
+        mockRecent([SNAPSHOT], { csvWarning: warning });
+        const info = rs.spyOn(toast, 'info').mockReturnValue(rs.fn());
+        const negative = rs.spyOn(toast, 'negative').mockReturnValue(rs.fn());
+        const user = userEvent.setup();
+        render(<Controls />);
+
+        const dialog = await openRecent(user);
+        const toggle = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' });
+        await user.click(toggle);
+
+        await waitFor(() => expect(info).toHaveBeenCalledWith(warning, expect.anything()));
+        expect(toggle).toBeChecked();
+        expect(negative).not.toHaveBeenCalled();
     });
 
     it('keeps Enter and Escape in the open list from the recording hotkeys; Escape drops a comment edit', async () => {

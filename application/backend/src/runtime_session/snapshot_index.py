@@ -193,14 +193,14 @@ def contents(project_root: Path, *, rebuild_first: bool = False) -> bytes:
         return (project_root / CSV_NAME).read_bytes()
 
 
-def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> tuple[dict[str, Any], OSError | None]:
     """Change fields of a snapshot's ``state.json`` (such as its label), then rebuild the index.
 
     The index is marked stale first. If it cannot be rebuilt once ``state.json`` is changed, the
     change stands and the index stays marked, for the next capture or download to rebuild it.
 
     Returns:
-        The updated ``state.json``.
+        The updated ``state.json``, and why the index could not be rebuilt, if it could not.
 
     Raises:
         FileNotFoundError: There is no such snapshot.
@@ -216,9 +216,10 @@ def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dic
         write_json(folder / STATE_FILE, document)
         try:
             _rebuild_locked(project_root)
-        except OSError:
+        except OSError as error:
             logger.exception("Changed {} but could not rebuild {}; the next check will", folder.name, CSV_NAME)
-        return document
+            return document, error
+        return document, None
 
 
 def write_json(path: Path, document: dict[str, Any]) -> None:

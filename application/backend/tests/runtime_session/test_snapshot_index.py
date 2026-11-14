@@ -283,9 +283,12 @@ def test_updating_a_label_rewrites_state_json_and_the_index(tmp_path) -> None:
     for index in range(3):
         snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(index)))
 
-    document = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": TRICKY_COMMENT})
+    document, index_error = snapshot_index.update(
+        tmp_path, _snapshot_id(1), {"defective": True, "comment": TRICKY_COMMENT}
+    )
 
     assert document["defective"] is True
+    assert index_error is None
     state = json.loads((tmp_path / _snapshot_id(1) / "state.json").read_text())
     assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
     assert state["robots"] == _document("x")["robots"]  # the rest is kept
@@ -320,9 +323,10 @@ def test_an_edit_cut_short_after_state_json_is_repaired_by_the_next_check(tmp_pa
     monkeypatch.setattr(snapshot_index, "_write_locked", _disk_full)
 
     # The label is changed (state.json is the truth); the index cannot be rewritten yet.
-    document = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": "dent"})
+    document, index_error = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": "dent"})
 
     assert (document["defective"], document["comment"]) == (True, "dent")
+    assert "No space left" in str(index_error)
     state = json.loads((tmp_path / _snapshot_id(1) / "state.json").read_text())
     assert (state["defective"], state["comment"]) == (True, "dent")
     assert _rows(tmp_path)[1]["defective"] == "false"  # stale, and marked so

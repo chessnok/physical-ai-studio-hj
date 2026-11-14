@@ -394,6 +394,7 @@ def test_the_api_changes_a_label_later(client, live, project) -> None:
     response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"defective": True})
     assert response.status_code == 200
     assert (response.json()["defective"], response.json()["comment"]) == (True, "ok")
+    assert response.json()["csv_warning"] is None
     response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"comment": f"  {TRICKY_COMMENT} "})
     assert response.status_code == 200
     assert (response.json()["defective"], response.json()["comment"]) == (True, TRICKY_COMMENT)
@@ -460,6 +461,8 @@ def test_a_label_change_whose_csv_cannot_be_rewritten_still_counts(client, live,
 
     assert response.status_code == 200
     assert (response.json()["defective"], response.json()["comment"]) == (True, "dent")
+    assert "snapshots.csv could not be rewritten" in response.json()["csv_warning"]
+    assert "No space left on device" in response.json()["csv_warning"]
     (row,) = _download(client, project)
     assert (row["defective"], row["comment"]) == ("true", "dent")
 

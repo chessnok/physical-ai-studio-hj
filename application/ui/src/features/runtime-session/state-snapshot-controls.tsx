@@ -112,6 +112,12 @@ const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot
         mutate(
             { params: { path: { project_id, snapshot_id: snapshot.snapshot_id } }, body },
             {
+                onSuccess: (changed) => {
+                    // Saved, but the CSV lags behind until the next capture or download.
+                    if (changed.csv_warning) {
+                        toast.info(changed.csv_warning, ERROR_TOAST);
+                    }
+                },
                 onError: (error) => {
                     const reason = getApiErrorMessage(error) ?? 'the backend did not answer.';
                     toast.negative(`Could not change the snapshot of ${time}: ${reason}`, ERROR_TOAST);

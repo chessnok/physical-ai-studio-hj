@@ -216,8 +216,14 @@ def update_label(
         changes["defective"] = defective
     if comment is not None:
         changes["comment"] = comment
-    document = snapshot_index.update(project_root, snapshot_id, changes)
-    return _summary(project_root / snapshot_id, document)
+    document, index_error = snapshot_index.update(project_root, snapshot_id, changes)
+    summary = _summary(project_root / snapshot_id, document)
+    if index_error is not None:
+        summary.csv_warning = (
+            f"The label is saved, but {snapshot_index.CSV_NAME} could not be rewritten ({index_error}); "
+            "the next capture or CSV download brings it up to date."
+        )
+    return summary
 
 
 def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:

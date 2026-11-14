@@ -71,3 +71,8 @@ class StateSnapshot(BaseModel):
         "(taken before labels existed)",
     )
     comment: str = Field(default="", description="The note saved with the snapshot")
+    csv_warning: str | None = Field(
+        default=None,
+        description="Set when a label change is saved but snapshots.csv could not be rewritten yet; "
+        "the next capture or CSV download brings it up to date",
+    )
