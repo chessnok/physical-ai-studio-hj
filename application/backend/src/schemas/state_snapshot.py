@@ -65,5 +65,9 @@ class StateSnapshot(BaseModel):
     follower: bool = Field(description="Whether the follower's joint positions were captured")
     leader: bool = Field(description="Whether the leader's joint positions were captured")
     warnings: list[str] = Field(default_factory=list, description="What could not be captured, and why")
-    defective: bool = Field(default=False, description="Whether the snapshot shows a defective part")
+    defective: bool | None = Field(
+        default=None,
+        description="Whether the snapshot shows a defective part; null if it was never labelled "
+        "(taken before labels existed)",
+    )
     comment: str = Field(default="", description="The note saved with the snapshot")

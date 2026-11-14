@@ -447,6 +447,25 @@ def test_the_csv_download_is_rebuilt_when_missing_or_damaged(client, live, proje
     assert _download(client, project, rebuild="true")[1]["comment"] == "by hand"
 
 
+def test_snapshots_from_before_labels_are_unlabelled_until_labelled(client, live, project) -> None:
+    created = _capture(client, live, project)
+    state_path = Path(created["path"]) / "state.json"
+    old = json.loads(state_path.read_text())
+    del old["defective"], old["comment"]  # as the first snapshot feature wrote them
+    state_path.write_text(json.dumps(old))
+    (state_path.parent.parent / snapshot_index.CSV_NAME).unlink()
+
+    assert client.get(_url(project)).json()[0]["defective"] is None
+    assert _download(client, project)[0]["defective"] == ""
+
+    response = client.patch(_url(project, f"/{created['snapshot_id']}"), json={"comment": "seen"})
+    assert (response.json()["defective"], response.json()["comment"]) == (None, "seen")
+    assert _download(client, project)[0]["defective"] == ""
+    response = client.patch(_url(project, f"/{created['snapshot_id']}"), json={"defective": False})
+    assert response.json()["defective"] is False
+    assert _download(client, project)[0]["defective"] == "false"
+
+
 def test_the_list_can_be_limited_to_the_newest(client, live, project) -> None:
     created = [_capture(client, live, project, comment=str(index))["snapshot_id"] for index in range(3)]
 

@@ -181,7 +181,7 @@ def test_a_missing_index_is_rebuilt_from_every_snapshot(tmp_path) -> None:
 
     rows = _rows(tmp_path)
     assert [(row["snapshot_id"], row["defective"], row["comment"]) for row in rows] == [
-        ("20261113-170000-000", "false", ""),
+        ("20261113-170000-000", "", ""),  # not labelled, which is not the same as good
         ("20261114-030000-123", "true", ""),
     ]
 
@@ -225,7 +225,7 @@ def test_an_index_out_of_step_with_the_folders_is_rebuilt(tmp_path) -> None:
 
 def test_a_state_json_of_an_unexpected_shape_still_gets_its_row(tmp_path) -> None:
     good = _save(tmp_path, _snapshot_id(1))
-    _save(tmp_path, _snapshot_id(2), robots={"follower": "not a dict"}, cameras="nope")
+    _save(tmp_path, _snapshot_id(2), robots={"follower": "not a dict"}, cameras="nope", defective=True, comment="dent")
     (tmp_path / _snapshot_id(3)).mkdir()
     (tmp_path / _snapshot_id(3) / "state.json").write_text("{ not json")
     _save(tmp_path, _snapshot_id(4), robots={"follower": {"joint_positions": {"gripper.pos": "high"}}})
@@ -235,7 +235,41 @@ def test_a_state_json_of_an_unexpected_shape_still_gets_its_row(tmp_path) -> Non
     rows = {row["snapshot_id"]: row for row in _rows(tmp_path)}
     assert list(rows) == [_snapshot_id(1), _snapshot_id(2), _snapshot_id(4)]  # unreadable JSON is left out
     assert "unexpected shape" in rows[_snapshot_id(2)]["warnings"]
+    # Its label survives where it is readable.
+    assert (rows[_snapshot_id(2)]["defective"], rows[_snapshot_id(2)]["comment"]) == ("true", "dent")
     assert rows[_snapshot_id(4)]["follower_joint_1"] == ""
+
+
+def test_a_placeholder_row_leaves_an_unreadable_label_empty(tmp_path) -> None:
+    _save(tmp_path, _snapshot_id(1), robots={"follower": "not a dict"}, defective="yes", comment=7)
+
+    snapshot_index.rebuild(tmp_path)
+
+    (row,) = _rows(tmp_path)
+    assert (row["defective"], row["comment"]) == ("", "")
+    assert "unexpected shape" in row["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("label", "cell"),
+    [
+        pytest.param({"defective": True}, "true", id="defective"),
+        pytest.param({"defective": False}, "false", id="good"),
+        pytest.param({}, "", id="never labelled"),
+        pytest.param({"defective": None}, "", id="null"),
+        pytest.param({"defective": "yes"}, "", id="not a bool"),
+    ],
+)
+def test_an_unlabelled_snapshot_is_neither_good_nor_defective(tmp_path, label, cell) -> None:
+    document = _document(_snapshot_id(1)) | label
+    if "defective" not in label:
+        del document["defective"]
+    (tmp_path / _snapshot_id(1)).mkdir()
+    snapshot_index.write_json(tmp_path / _snapshot_id(1) / "state.json", document)
+
+    snapshot_index.append(tmp_path, document)
+
+    assert _rows(tmp_path)[0]["defective"] == cell
 
 
 def test_contents_of_a_project_without_snapshots_is_the_header(tmp_path) -> None:

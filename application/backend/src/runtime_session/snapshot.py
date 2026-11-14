@@ -221,6 +221,8 @@ def update_label(
 
 
 def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
+    # Snapshots from before labels existed have none: neither good nor defective, but unlabelled.
+    defective, comment = document.get("defective"), document.get("comment")
     robots = document.get("robots") or {}
     leader = robots.get("leader") or {}
     cameras = [
@@ -243,8 +245,8 @@ def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
         follower=(robots.get("follower") or {}).get("joint_positions") is not None,
         leader=leader.get("joint_positions") is not None,
         warnings=document.get("warnings", []),
-        defective=document.get("defective") is True,
-        comment=document.get("comment") or "",
+        defective=defective if isinstance(defective, bool) else None,
+        comment=comment if isinstance(comment, str) else "",
     )
 
 

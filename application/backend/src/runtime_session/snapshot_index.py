@@ -14,7 +14,8 @@ Columns, in this order (stable; new columns are only ever added at the end):
 
 - ``snapshot_id``: the snapshot's folder name, its local capture time ``YYYYmmdd-HHMMSS-mmm``.
 - ``captured_at_local``, ``captured_at_utc``: ISO 8601 with milliseconds and UTC offset.
-- ``defective``: ``true`` or ``false``.
+- ``defective``: ``true``, ``false``, or empty: not labelled (taken before labels existed; label it
+  with the API or the snapshot list).
 - ``comment``: free text as entered (at most 500 characters), or empty.
 - ``environment_id``, ``environment_name``, ``session_id``.
 - ``control_mode``: what drove the follower: ``teleop``, ``model``, …; empty when it was held still.
@@ -112,8 +113,8 @@ def row(document: dict[str, Any]) -> list[str]:
         "snapshot_id": snapshot_id,
         "captured_at_local": captured.get("local") or "",
         "captured_at_utc": captured.get("utc") or "",
-        "defective": "true" if document.get("defective") is True else "false",
-        "comment": document.get("comment") or "",
+        "defective": _label(document.get("defective")),
+        "comment": _comment(document.get("comment")),
         "environment_id": environment.get("id") or "",
         "environment_name": environment.get("name") or "",
         "session_id": session.get("id") or "",
@@ -219,14 +220,29 @@ def _number(value: Any) -> str:
         return ""
 
 
+def _label(defective: Any) -> str:
+    """``true``, ``false``, or empty for a snapshot that was never labelled."""
+    if isinstance(defective, bool):
+        return "true" if defective else "false"
+    return ""
+
+
+def _comment(comment: Any) -> str:
+    return comment if isinstance(comment, str) else ""
+
+
 def _row_or_placeholder(document: dict[str, Any]) -> list[str]:
-    """:func:`row`, or for a ``state.json`` it cannot make sense of, its id and why."""
+    """:func:`row`, or for a ``state.json`` it cannot make sense of, its id, label and why."""
     try:
         return row(document)
     except (AttributeError, TypeError, ValueError) as error:
         logger.warning("Snapshot {} has an unexpected state.json: {}", document.get("snapshot_id"), error)
-        values = {"snapshot_id": str(document.get("snapshot_id", "")), "defective": "false"}
-        values["warnings"] = f"state.json has an unexpected shape: {error}"
+        values = {
+            "snapshot_id": str(document.get("snapshot_id", "")),
+            "defective": _label(document.get("defective")),
+            "comment": _comment(document.get("comment")),
+            "warnings": f"state.json has an unexpected shape: {error}",
+        }
         return [values.get(column, "") for column in COLUMNS]
 
 
