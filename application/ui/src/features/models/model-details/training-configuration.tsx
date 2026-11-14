@@ -56,6 +56,16 @@ export const TrainingParameters = ({ summary }: { summary: SchemaModelDetailResp
                 {summary.snapflow_distill_epochs !== null && summary.snapflow_distill_epochs !== undefined && (
                     <DetailRow name='Distillation epochs' value={summary.snapflow_distill_epochs} />
                 )}
+                {summary.early_stopping_patience !== null && summary.early_stopping_patience !== undefined && (
+                    <DetailRow
+                        name='Early stopping'
+                        value={`Patience ${summary.early_stopping_patience} epochs${
+                            summary.early_stopping_min_delta
+                                ? `, min. improvement ${summary.early_stopping_min_delta}`
+                                : ''
+                        }`}
+                    />
+                )}
             </Flex>
         </View>
     );

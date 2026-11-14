@@ -1415,6 +1415,86 @@ describe('TrainModelDialog', () => {
         });
     });
 
+    describe('early stopping', () => {
+        // ACT reaches the training parameters step with one Next; `configure` runs there.
+        const submitAndCapturePayload = async (
+            configure?: (user: ReturnType<typeof userEvent.setup>) => Promise<void>
+        ) => {
+            const user = userEvent.setup();
+            let body: Record<string, unknown> | undefined;
+
+            mockProjectWithRemoteTrainer();
+            server.use(
+                http.post('/api/jobs:train', async ({ request }) => {
+                    body = (await request.json()) as Record<string, unknown>;
+                    return HttpResponse.json({}, { status: 201 });
+                })
+            );
+
+            renderDialog();
+
+            await user.click(await screen.findByRole('button', { name: /select…/i }));
+            await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+            await user.click(screen.getByRole('button', { name: 'Next' }));
+            await screen.findByRole('checkbox', { name: 'Early stopping' });
+            await configure?.(user);
+            await goToLastStep(user);
+            await user.click(screen.getByRole('button', { name: 'Train' }));
+
+            await waitFor(() => expect(body).toBeDefined());
+            return body;
+        };
+
+        it('is off and sends no early-stopping fields unless the box is ticked', async () => {
+            const body = await submitAndCapturePayload(async () => {
+                expect(screen.getByRole('checkbox', { name: 'Early stopping' })).not.toBeChecked();
+                expect(screen.queryByRole('textbox', { name: 'Patience (epochs)' })).not.toBeInTheDocument();
+            });
+
+            expect(body).not.toHaveProperty('early_stopping_patience');
+            expect(body).not.toHaveProperty('early_stopping_min_delta');
+        });
+
+        it('sends the default patience of 5 and no minimum improvement when ticked', async () => {
+            const body = await submitAndCapturePayload(async (user) => {
+                await user.click(screen.getByRole('checkbox', { name: 'Early stopping' }));
+                expect(screen.getByRole('textbox', { name: 'Patience (epochs)' })).toHaveValue('5');
+                expect(screen.getByRole('textbox', { name: 'Minimum improvement' })).toHaveValue('');
+            });
+
+            expect(body).toMatchObject({ early_stopping_patience: 5 });
+            expect(body).not.toHaveProperty('early_stopping_min_delta');
+        });
+
+        it('sends the patience and minimum improvement the user enters', async () => {
+            const body = await submitAndCapturePayload(async (user) => {
+                await user.click(screen.getByRole('checkbox', { name: 'Early stopping' }));
+                const patience = screen.getByRole('textbox', { name: 'Patience (epochs)' });
+                await user.clear(patience);
+                await user.type(patience, '3');
+                const minDelta = screen.getByRole('textbox', { name: 'Minimum improvement' });
+                await user.type(minDelta, '0.002');
+                await user.tab();
+            });
+
+            expect(body).toMatchObject({ early_stopping_patience: 3, early_stopping_min_delta: 0.002 });
+        });
+
+        it('sends nothing once the box is ticked and unticked again', async () => {
+            const body = await submitAndCapturePayload(async (user) => {
+                const checkbox = screen.getByRole('checkbox', { name: 'Early stopping' });
+                await user.click(checkbox);
+                await user.type(screen.getByRole('textbox', { name: 'Minimum improvement' }), '0.01');
+                await user.tab();
+                await user.click(checkbox);
+                expect(screen.queryByRole('textbox', { name: 'Patience (epochs)' })).not.toBeInTheDocument();
+            });
+
+            expect(body).not.toHaveProperty('early_stopping_patience');
+            expect(body).not.toHaveProperty('early_stopping_min_delta');
+        });
+    });
+
     it('hides LoRA fine-tuning controls for a policy without PEFT support', async () => {
         const user = userEvent.setup();
         mockProjectWithRemoteTrainer();

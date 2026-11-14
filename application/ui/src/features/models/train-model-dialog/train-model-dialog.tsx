@@ -23,7 +23,7 @@ import { FeatureMappingStep } from './feature-mapping-step';
 import { formatBytes } from './policies';
 import { SetupStep } from './setup-step';
 import { TrainingDeviceInfo } from './training-device-info';
-import { MIN_EPOCHS_FOR_SNAPFLOW, TrainingParameters } from './training-parameters';
+import { DEFAULT_EARLY_STOPPING_PATIENCE, MIN_EPOCHS_FOR_SNAPFLOW, TrainingParameters } from './training-parameters';
 import { getEstimatedTrainingSteps, TRAINING_VAL_SPLIT } from './training-steps';
 import { TrainingSummaryNote } from './training-summary-note';
 import { useExportBackends } from './use-export-backends';
@@ -174,6 +174,9 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [snapflowEnabled, setSnapflowEnabled] = useState<boolean>(false);
     const [snapflowDistillEpochs, setSnapflowDistillEpochs] = useState<number>(DEFAULT_SNAPFLOW_DISTILL_EPOCHS);
     const [augmentImages, setAugmentImages] = useState<boolean>(false);
+    const [earlyStoppingEnabled, setEarlyStoppingEnabled] = useState<boolean>(false);
+    const [earlyStoppingPatience, setEarlyStoppingPatience] = useState<number>(DEFAULT_EARLY_STOPPING_PATIENCE);
+    const [earlyStoppingMinDelta, setEarlyStoppingMinDelta] = useState<number | null>(null);
     const [selectedGpuKey, setSelectedGpuKey] = useState<Key | null>(null);
     const [modalGpu, setModalGpu] = useState<Key | null>('A10G');
     const selectedTarget = trainingTargetOptions.find((option) => option.id === targetId) ?? null;
@@ -412,6 +415,17 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                 snapflow_distill_epochs: snapflowDistillEpochs,
                 augment_images: augmentImages,
                 val_split: TRAINING_VAL_SPLIT,
+                // Sent only when asked for: a payload without these fields trains for the full max_epochs.
+                ...(earlyStoppingEnabled
+                    ? {
+                          early_stopping_patience: Number.isFinite(earlyStoppingPatience)
+                              ? earlyStoppingPatience
+                              : DEFAULT_EARLY_STOPPING_PATIENCE,
+                          ...(earlyStoppingMinDelta === null
+                              ? {}
+                              : { early_stopping_min_delta: earlyStoppingMinDelta }),
+                      }
+                    : {}),
                 ...extraPayload,
             } as const;
 
@@ -531,6 +545,12 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 onCompileModelChange={setCompileModel}
                                 augmentImages={augmentImages}
                                 onAugmentImagesChange={setAugmentImages}
+                                earlyStoppingEnabled={earlyStoppingEnabled}
+                                onEarlyStoppingEnabledChange={setEarlyStoppingEnabled}
+                                earlyStoppingPatience={earlyStoppingPatience}
+                                onEarlyStoppingPatienceChange={setEarlyStoppingPatience}
+                                earlyStoppingMinDelta={earlyStoppingMinDelta}
+                                onEarlyStoppingMinDeltaChange={setEarlyStoppingMinDelta}
                                 isAutoScaleBatchDisabled={deviceType !== 'cuda'}
                                 deviceType={deviceType}
                                 isLoraSupported={isLoraSupported}

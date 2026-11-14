@@ -38,6 +38,9 @@ export const RECOMMENDED_PRECISION: Record<string, string> = {
  */
 export const MIN_EPOCHS_FOR_SNAPFLOW = 2;
 
+/** Patience offered when early stopping is switched on. */
+export const DEFAULT_EARLY_STOPPING_PATIENCE = 5;
+
 export const PRECISION_LABELS: Record<string, string> = {
     'bf16-mixed': 'BF16 Mixed',
     'bf16-true': 'BF16 True',
@@ -60,6 +63,13 @@ interface TrainingParametersProps {
     onCompileModelChange: (value: boolean) => void;
     augmentImages: boolean;
     onAugmentImagesChange: (value: boolean) => void;
+    earlyStoppingEnabled: boolean;
+    onEarlyStoppingEnabledChange: (value: boolean) => void;
+    earlyStoppingPatience: number;
+    onEarlyStoppingPatienceChange: (value: number) => void;
+    /** Null leaves it to the backend default: any decrease counts as an improvement. */
+    earlyStoppingMinDelta: number | null;
+    onEarlyStoppingMinDeltaChange: (value: number | null) => void;
     isAutoScaleBatchDisabled: boolean;
     deviceType: string | undefined;
     /** False for policies without a LoRA/DoRA mixin; hides the LoRA controls entirely. */
@@ -98,6 +108,12 @@ export const TrainingParameters = ({
     onCompileModelChange,
     augmentImages,
     onAugmentImagesChange,
+    earlyStoppingEnabled,
+    onEarlyStoppingEnabledChange,
+    earlyStoppingPatience,
+    onEarlyStoppingPatienceChange,
+    earlyStoppingMinDelta,
+    onEarlyStoppingMinDeltaChange,
     isAutoScaleBatchDisabled,
     deviceType,
     isLoraSupported,
@@ -279,6 +295,69 @@ export const TrainingParameters = ({
                         </Text>
                     </Content>
                 </ContextualHelp>
+            </Flex>
+            <Flex direction='column' gap='size-150' width='100%'>
+                <Flex direction='row' gap='size-100' alignItems='center'>
+                    <Checkbox isEmphasized isSelected={earlyStoppingEnabled} onChange={onEarlyStoppingEnabledChange}>
+                        Early stopping
+                    </Checkbox>
+                    <ContextualHelp variant='info'>
+                        <Heading>Early stopping</Heading>
+                        <Content>
+                            <Text>
+                                Ends training once the validation loss has not improved for a number of epochs in a row,
+                                so Max Epochs becomes an upper limit instead of a fixed length. The saved model is the
+                                epoch with the lowest validation loss either way. With SnapFlow, only the normal
+                                training stops early; distillation then starts right away and runs all its epochs.
+                            </Text>
+                        </Content>
+                    </ContextualHelp>
+                </Flex>
+                {earlyStoppingEnabled && (
+                    <div className={classes.optionFields}>
+                        <NumberField
+                            label='Patience (epochs)'
+                            value={earlyStoppingPatience}
+                            onChange={onEarlyStoppingPatienceChange}
+                            minValue={1}
+                            maxValue={1000}
+                            step={1}
+                            width='100%'
+                            contextualHelp={
+                                <ContextualHelp variant='info'>
+                                    <Heading>Patience</Heading>
+                                    <Content>
+                                        <Text>
+                                            How many epochs in a row the validation loss may fail to improve before
+                                            training stops. Higher values wait longer for a late improvement.
+                                        </Text>
+                                    </Content>
+                                </ContextualHelp>
+                            }
+                        />
+                        <NumberField
+                            label='Minimum improvement'
+                            // NaN shows an empty field while keeping it controlled.
+                            value={earlyStoppingMinDelta ?? Number.NaN}
+                            onChange={(value) => onEarlyStoppingMinDeltaChange(Number.isNaN(value) ? null : value)}
+                            minValue={0}
+                            step={0.001}
+                            formatOptions={{ maximumFractionDigits: 6 }}
+                            width='100%'
+                            contextualHelp={
+                                <ContextualHelp variant='info'>
+                                    <Heading>Minimum improvement</Heading>
+                                    <Content>
+                                        <Text>
+                                            Smallest drop in validation loss that counts as an improvement. Leave empty
+                                            to count any drop.
+                                        </Text>
+                                    </Content>
+                                </ContextualHelp>
+                            }
+                        />
+                    </div>
+                )}
             </Flex>
             {isLoraSupported && (
                 <Flex direction='column' gap='size-150' width='100%'>
