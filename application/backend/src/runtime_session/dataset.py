@@ -29,11 +29,12 @@ from workers import dataset_worker as dataset_rpc
 from workers.dataset_worker import DatasetWorker, RecordingStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from uuid import UUID
 
     from runtime_session.store import Store
     from schemas.dataset import Dataset
+    from schemas.project_camera import Camera
 
 COMPONENT = "dataset"
 """What a recording reports as."""
@@ -123,6 +124,21 @@ def _image_spec(feature: dict[str, Any]) -> ImageSpec:
     info = feature.get("info") or {}
     is_depth = info.get("is_depth_map") or info.get("video.is_depth_map")
     return ImageSpec(height, width, channels, "uint16" if is_depth else "uint8")
+
+
+def slow_cameras_warning(cameras: Iterable[Camera], fps: int) -> str | None:
+    """Why recording at ``fps`` repeats frames of cameras that deliver fewer, or ``None`` if none does.
+
+    A dataset samples every camera's latest frame at its own rate, so a camera at 15 fps in a
+    30 fps dataset has each of its frames recorded twice.
+    """
+    slow = [f"{camera.name!r} ({camera.payload.fps} fps)" for camera in cameras if camera.payload.fps < fps]
+    if not slow:
+        return None
+    return (
+        f"The dataset records at {fps} fps, faster than camera(s) {', '.join(slow)}: their frames will be "
+        f"repeated. Set those cameras to {fps} fps, or record a new dataset at a lower rate."
+    )
 
 
 def lerobot_features(spec: FeatureSpec) -> dict[str, Any]:

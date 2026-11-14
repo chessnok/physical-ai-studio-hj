@@ -582,3 +582,18 @@ async def test_a_real_rgbd_recording_lands_in_the_dataset_with_depth_aligned_to_
     assert lerobot.meta.total_episodes == 2
     last = lerobot[len(lerobot) - 1]["observation.images.top_depth"].numpy()[0]
     assert np.abs(last[~holes] - expected[~holes]).max() <= 1.5
+
+
+async def test_recording_faster_than_a_camera_warns_that_frames_repeat(new_session, fake_cameras, fake_worker) -> None:
+    dataset = _dataset()
+    session = await new_session()
+    environment = make_environment()
+    environment.cameras[0].payload.fps = 15
+    await session.load_environment(environment)
+    errors: list = []
+    with patch.object(session, "_emit", side_effect=errors.append):
+        await session.load_dataset(dataset, 30)
+    warnings = [message for message in errors if getattr(message, "error_code", None) == "camera_fps_below_dataset_fps"]
+    assert len(warnings) == 1
+    assert "'Cam 0' (15 fps)" in warnings[0].message
+    assert warnings[0].session_alive
