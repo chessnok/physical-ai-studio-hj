@@ -7,7 +7,7 @@ import multiprocessing as mp
 import queue
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -18,10 +18,6 @@ from schemas.dataset import Snapshot
 from schemas.job import LocalTrainJobPayload, RemoteTrainJobPayload, TrainingPrecision, TrainJobPayload
 from schemas.model import Model
 from services.snapshot_service import SnapshotService
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 MODULE = "workers.training_worker"
 
@@ -37,6 +33,7 @@ def _make_payload(
     precision: TrainingPrecision = TrainingPrecision.BF16_MIXED,
     lora_enabled: bool = False,
     lora_use_dora: bool = False,
+    early_stopping_patience: int | None = None,
 ) -> TrainJobPayload:
     return LocalTrainJobPayload(
         project_id=uuid4(),
@@ -51,6 +48,7 @@ def _make_payload(
         precision=precision,
         lora_enabled=lora_enabled,
         lora_use_dora=lora_use_dora,
+        early_stopping_patience=early_stopping_patience,
     )
 
 
@@ -338,6 +336,51 @@ class TestTraining:
             backend.train.assert_awaited_once()
             model_service.create_model.assert_awaited_once_with(model)
             assert job_service.update_job_status.call_args_list[0].kwargs["status"] == JobStatus.COMPLETED
+            assert job_service.update_job_status.call_args_list[0].kwargs["message"] == "Training finished"
+
+    @pytest.mark.anyio
+    async def test_an_early_stop_is_named_in_the_completed_jobs_message(self, worker, tmp_path):
+        """Every backend leaves the summary in the model directory; the final status reads it from there."""
+        from training.job import EARLY_STOPPING_SUMMARY_NAME, EarlyStoppingSummary
+
+        payload = _make_payload(early_stopping_patience=2)
+        model = _make_model(tmp_path)
+        job = _make_job(payload)
+        summary = EarlyStoppingSummary(
+            patience=2,
+            min_delta=0.0,
+            max_epochs=20,
+            epochs_trained=7,
+            stopped_after_epoch=7,
+            best_epoch=5,
+            best_val_loss=0.25,
+        )
+
+        async def train(_context):
+            (Path(model.path) / EARLY_STOPPING_SUMMARY_NAME).write_text(summary.model_dump_json())
+
+        backend = MagicMock()
+        backend.train = AsyncMock(side_effect=train)
+        dispatcher = MagicMock()
+        dispatcher.is_alive = MagicMock(return_value=False)
+
+        with (
+            patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
+            patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
+            patch(f"{MODULE}.JobService") as MockJobService,
+            patch(f"{MODULE}.ModelService") as MockModelService,
+        ):
+            job_service = MockJobService.return_value
+            job_service.update_job_status = AsyncMock(return_value=MagicMock(id=job.id))
+            job_service.update_job = AsyncMock(return_value=MagicMock())
+            MockModelService.return_value.create_model = AsyncMock(return_value=model)
+
+            await worker._train_model(job, model, _make_snapshot(tmp_path), payload, base_model=None)
+
+        final = job_service.update_job_status.call_args_list[0].kwargs
+        assert final["status"] == JobStatus.COMPLETED
+        assert final["message"] == "Training finished: stopped early after epoch 7 of 20; best epoch 5 (val/loss 0.25)"
 
     @pytest.mark.anyio
     async def test_context_passes_output_and_cache_dirs(self, worker, tmp_path):

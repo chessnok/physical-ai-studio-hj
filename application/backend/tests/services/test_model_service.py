@@ -224,6 +224,23 @@ def test_get_training_summary_carries_lora_fields_when_enabled() -> None:
     )
 
 
+def test_get_training_summary_omits_early_stopping_when_disabled() -> None:
+    summary = ModelService.get_training_summary(_make_train_job())
+
+    assert summary is not None
+    assert (summary.early_stopping_patience, summary.early_stopping_min_delta) == (None, None)
+
+
+@pytest.mark.parametrize(("min_delta", "expected"), [(None, 0.0), (0.01, 0.01)])
+def test_get_training_summary_carries_early_stopping_when_enabled(min_delta: float | None, expected: float) -> None:
+    summary = ModelService.get_training_summary(
+        _make_train_job(early_stopping_patience=5, early_stopping_min_delta=min_delta)
+    )
+
+    assert summary is not None
+    assert (summary.early_stopping_patience, summary.early_stopping_min_delta) == (5, expected)
+
+
 class TestSnapFlowFlag:
     """`snapflow_enabled` tells the models list which checkpoints are distilled.
 

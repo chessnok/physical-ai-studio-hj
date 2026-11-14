@@ -30,6 +30,7 @@ from services.training_backends import (
 )
 from services.training_service import TrainingTrackingDispatcher
 from settings import get_settings
+from training.job import completion_message
 from workers.base import ProcessWorker
 
 if TYPE_CHECKING:
@@ -222,7 +223,11 @@ class TrainingWorker(ProcessWorker[None]):
         else:
             async with get_async_db_session_ctx() as session:
                 job = await JobService(session, RemoteTrainerService(session)).update_job_status(
-                    job_id=job.id, status=JobStatus.COMPLETED, message="Training finished"
+                    # Says so when early stopping ended the run (read from the model directory,
+                    # where every backend leaves the summary).
+                    job_id=job.id,
+                    status=JobStatus.COMPLETED,
+                    message=completion_message(model.path),
                 )
                 model = await ModelService(session).create_model(model)
             self.queue.put((EventType.MODEL_UPDATE, model))

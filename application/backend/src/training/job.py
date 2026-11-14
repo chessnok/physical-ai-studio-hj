@@ -85,6 +85,29 @@ PEFT_POLICIES = frozenset({"pi05", "molmoact2"})
 """Policies whose ``Config`` mixes in ``physicalai.policies.mixins.peft.PeftConfigMixin`` and
 support LoRA/DoRA fine-tuning."""
 
+EARLY_STOPPING_SUMMARY_NAME = "early_stopping.json"
+"""What early stopping did, written into ``output_dir`` beside the checkpoint
+whenever a run has early stopping enabled. It travels inside the model
+artifact, so Studio reads the same file after a local, Modal, AWS Batch, or
+remote-trainer run (see :func:`read_early_stopping_summary`)."""
+
+EARLY_STOPPING_UNSUPPORTED_MESSAGE = (
+    "The remote trainer does not support early stopping: it runs trainer code from before the feature "
+    "existed. Redeploy or update the trainer (for Modal: deploy the trainer again from this Studio), "
+    "or train without early stopping."
+)
+"""Shown instead of the raw validation error an older trainer returns for the
+early-stopping fields (see :func:`explain_trainer_rejection`)."""
+
+
+def _is_unset(value: object) -> bool:
+    """Serialization filter: the early-stopping fields are sent only when early stopping is on."""
+    return value is None
+
+
+def _is_zero(value: float) -> bool:
+    return value == 0.0
+
 
 class RunOptions(BaseModel):
     """Runtime-only controls which are not part of the training payload."""
@@ -178,6 +201,25 @@ class TrainingJobSpec(BaseModel):
         default=False,
         description="Use DoRA (Weight-Decomposed LoRA) instead of plain LoRA. Ignored unless lora_enabled.",
     )
+    # Both early-stopping fields are left out of the serialized spec while early
+    # stopping is off, so a spec without it still validates on a trainer that
+    # predates the feature (this model forbids unknown fields).
+    early_stopping_patience: int | None = Field(
+        default=None,
+        ge=1,
+        exclude_if=_is_unset,
+        description=(
+            "Stop when val/loss has not improved for this many validation epochs in a row. "
+            "None disables early stopping. Needs val_split > 0. On a SnapFlow run it applies to the "
+            "flow-matching phase only: stopping it starts distillation early."
+        ),
+    )
+    early_stopping_min_delta: float = Field(
+        default=0.0,
+        ge=0.0,
+        exclude_if=_is_zero,
+        description="Smallest val/loss decrease that counts as an improvement. Ignored unless early stopping is on.",
+    )
     run_options: RunOptions = Field(default_factory=RunOptions)
 
     @model_validator(mode="after")
@@ -231,6 +273,138 @@ class TrainingJobSpec(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def validate_early_stopping(self) -> TrainingJobSpec:
+        """Reject early stopping without a validation split; drop a min_delta that has no effect.
+
+        Returns:
+            The validated spec.
+
+        Raises:
+            ValueError: If early stopping is on but no episodes are held out
+                for the ``val/loss`` it monitors.
+        """
+        if self.early_stopping_patience is None:
+            # Ignored without early stopping; zeroed so it is not sent over the wire either.
+            self.early_stopping_min_delta = 0.0
+            return self
+        if self.val_split <= 0:
+            msg = (
+                "Early stopping watches val/loss, which needs a validation split: "
+                "set val_split above 0 or turn early stopping off."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class EarlyStoppingSummary(BaseModel):
+    """What early stopping did in one run (contents of :data:`EARLY_STOPPING_SUMMARY_NAME`).
+
+    Epoch numbers are 1-based, as a person counts them. On a SnapFlow run
+    early stopping watches the flow-matching phase only; ``stopped_after_epoch``
+    then ends that phase, and distillation still runs its full budget
+    (``distillation_epochs``) right after it.
+
+    Example:
+        >>> summary = EarlyStoppingSummary(
+        ...     patience=3, min_delta=0.0, max_epochs=30, epochs_trained=12,
+        ...     stopped_after_epoch=12, best_epoch=9, best_val_loss=0.5194,
+        ... )
+        >>> summary.message
+        'stopped early after epoch 12 of 30; best epoch 9 (val/loss 0.5194)'
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    patience: int
+    min_delta: float
+    max_epochs: int = Field(description="Planned epoch budget, distillation included.")
+    epochs_trained: int = Field(description="Epochs that actually ran, distillation included.")
+    stopped_after_epoch: int | None = Field(
+        default=None,
+        description="Last epoch trained before early stopping ended the run (or phase); None if it never did.",
+    )
+    reason: str | None = Field(default=None, description="Lightning's stopping reason, e.g. 'patience_exhausted'.")
+    best_epoch: int | None = Field(default=None, description="Epoch with the lowest val/loss in the watched phase.")
+    best_val_loss: float | None = None
+    flow_matching_epochs: int | None = Field(
+        default=None, description="SnapFlow runs: planned flow-matching epochs before distillation."
+    )
+    distillation_epochs: int | None = Field(default=None, description="SnapFlow runs: distillation epochs.")
+
+    @property
+    def stopped_early(self) -> bool:
+        return self.stopped_after_epoch is not None
+
+    @property
+    def message(self) -> str | None:
+        """One line for the job status, or None when early stopping never triggered."""
+        if self.stopped_after_epoch is None:
+            return None
+        best = (
+            f"best epoch {self.best_epoch} (val/loss {self.best_val_loss:.4g})"
+            if self.best_epoch is not None and self.best_val_loss is not None
+            else "no finite val/loss"
+        )
+        cause = "; val/loss was not finite" if self.reason == "non_finite_metric" else ""
+        if self.distillation_epochs is not None:
+            planned = self.flow_matching_epochs if self.flow_matching_epochs is not None else self.max_epochs
+            return (
+                f"flow matching stopped early after epoch {self.stopped_after_epoch} of {planned}{cause}; "
+                f"{best}; then distilled for {self.distillation_epochs} epochs"
+            )
+        return f"stopped early after epoch {self.stopped_after_epoch} of {self.max_epochs}{cause}; {best}"
+
+
+def read_early_stopping_summary(model_dir: Path | str) -> EarlyStoppingSummary | None:
+    """Read a finished model's early-stopping summary.
+
+    Returns:
+        The summary, or None when the run had early stopping off or the file is
+        missing or unreadable (logged; a summary is informational only).
+    """
+    path = Path(model_dir) / EARLY_STOPPING_SUMMARY_NAME
+    if not path.is_file():
+        return None
+    try:
+        return EarlyStoppingSummary.model_validate_json(path.read_text())
+    except (OSError, ValueError):
+        logger.warning("Ignoring unreadable early-stopping summary %s", path, exc_info=True)
+        return None
+
+
+def completion_message(model_dir: Path | str) -> str:
+    """Status line for a successfully finished training job.
+
+    Returns:
+        ``"Training finished"``, extended with what early stopping did when it
+        ended the run (or its flow-matching phase) early.
+    """
+    summary = read_early_stopping_summary(model_dir)
+    detail = summary.message if summary is not None else None
+    return f"Training finished: {detail}" if detail else "Training finished"
+
+
+def explain_trainer_rejection(error_text: str | None) -> str | None:
+    """Recognize an older trainer rejecting the early-stopping fields of a spec.
+
+    A trainer that predates early stopping validates the spec with
+    ``extra="forbid"`` and fails with a generic pydantic error naming the
+    field. That only happens when early stopping is on, since the fields are
+    not serialized otherwise.
+
+    Args:
+        error_text: The trainer's failure message or HTTP error body.
+
+    Returns:
+        :data:`EARLY_STOPPING_UNSUPPORTED_MESSAGE` for that rejection, else None.
+    """
+    if not error_text or "early_stopping_" not in error_text:
+        return None
+    if "extra_forbidden" in error_text or "Extra inputs are not permitted" in error_text:
+        return EARLY_STOPPING_UNSUPPORTED_MESSAGE
+    return None
 
 
 def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None) -> Policy:
@@ -364,6 +538,13 @@ def run_training_job(
     picks, so the exported artifact (and therefore inference) always matches
     the checkpoint a distilled model ships.
 
+    When ``spec.early_stopping_patience`` is set, training ends once
+    ``val/loss`` has not improved for that many epochs, and
+    :data:`EARLY_STOPPING_SUMMARY_NAME` records what happened. The published
+    checkpoint is still the best epoch, as with any run. On a SnapFlow run an
+    early stop ends only the flow-matching phase; distillation then starts at
+    the next epoch and runs its full budget.
+
     Cancellation is cooperative. ``should_stop`` is polled throughout training
     via :class:`~physicalai.train.callbacks.ProgressReportingCallback`; when it
     returns True this function stops after the fit loop unwinds and returns
@@ -428,6 +609,9 @@ def run_training_job(
         snapflow_callback = _build_snapflow_callback(spec)
         if snapflow_callback is not None:
             callbacks.append(snapflow_callback)
+        early_stopping_callback = _build_early_stopping_callback(spec, snapflow_callback)
+        if early_stopping_callback is not None:
+            callbacks.append(early_stopping_callback)
 
         trainer = Trainer(
             logger=CSVLogger(cache_dir.parent, name=cache_dir.stem),
@@ -447,6 +631,8 @@ def run_training_job(
             logger.info("Training canceled; skipping checkpoint and export")
             return
 
+        if early_stopping_callback is not None:
+            _record_early_stopping(early_stopping_callback, trainer, cache_dir, report)
         _finalize_checkpoints(trainer, cache_dir, snapflow_callback=snapflow_callback)
         _publish(cache_dir, output_dir)
 
@@ -474,6 +660,55 @@ def _build_snapflow_callback(spec: TrainingJobSpec) -> Any:
         start_epoch=spec.snapflow_start_epoch,
         checkpoint_prefix=SNAPFLOW_CHECKPOINT_PREFIX,
     )
+
+
+def _build_early_stopping_callback(spec: TrainingJobSpec, snapflow_callback: Any) -> Any:
+    """Build the early-stopping callback a spec asks for.
+
+    Args:
+        spec: The training configuration.
+        snapflow_callback: This run's ``SnapFlowPhaseCallback``, or None. When
+            given, early stopping watches the flow-matching phase only (see
+            :class:`training.early_stopping.ValLossEarlyStopping`).
+
+    Returns:
+        A :class:`~training.early_stopping.ValLossEarlyStopping`, or None when
+        early stopping is off.
+    """
+    if spec.early_stopping_patience is None:
+        return None
+
+    from training.early_stopping import ValLossEarlyStopping
+
+    logger.info(
+        "Early stopping on val/loss: patience %d, min_delta %g%s",
+        spec.early_stopping_patience,
+        spec.early_stopping_min_delta,
+        " (flow-matching phase only)" if snapflow_callback is not None else "",
+    )
+    return ValLossEarlyStopping(
+        patience=spec.early_stopping_patience,
+        min_delta=spec.early_stopping_min_delta,
+        snapflow_callback=snapflow_callback,
+    )
+
+
+def _record_early_stopping(callback: Any, trainer: Any, cache_dir: Path, report: ReportFn) -> None:
+    """Write the early-stopping summary into the model directory and report an early stop.
+
+    Best-effort: the summary is informational, so a failure to build or write
+    it is logged and never fails a run that trained successfully.
+    """
+    try:
+        summary: EarlyStoppingSummary = callback.summary(trainer)
+        (cache_dir / EARLY_STOPPING_SUMMARY_NAME).write_text(summary.model_dump_json(indent=2))
+    except Exception:
+        logger.warning("Could not record the early-stopping summary", exc_info=True)
+        return
+    if summary.message is not None:
+        logger.info("Early stopping: %s", summary.message)
+        # Training is over; what is left (checkpoint, export) reports from 99 on.
+        report(99, summary.message[0].upper() + summary.message[1:], {})
 
 
 def _load_policy_from_checkpoint(spec: TrainingJobSpec, checkpoint: Path) -> Policy:

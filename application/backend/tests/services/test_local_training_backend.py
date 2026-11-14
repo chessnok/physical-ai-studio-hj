@@ -192,6 +192,21 @@ class TestBuildSpec:
         assert spec.snapflow_start_epoch == 8
         assert spec.max_epochs == 11
 
+    def test_an_ordinary_run_has_no_early_stopping(self, tmp_path):
+        spec = build_spec(_context(tmp_path, _payload()))
+
+        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (None, 0.0)
+
+    def test_early_stopping_settings_are_forwarded(self, tmp_path):
+        spec = build_spec(_context(tmp_path, _payload(early_stopping_patience=4, early_stopping_min_delta=0.01)))
+
+        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (4, 0.01)
+
+    def test_an_unset_min_delta_means_any_improvement_counts(self, tmp_path):
+        spec = build_spec(_context(tmp_path, _payload(early_stopping_patience=4)))
+
+        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (4, 0.0)
+
 
 class TestLocalTrainingBackend:
     @pytest.mark.anyio

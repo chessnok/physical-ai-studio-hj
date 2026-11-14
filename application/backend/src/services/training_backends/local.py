@@ -127,6 +127,8 @@ def build_spec(context: TrainingContext) -> TrainingJobSpec:
         lora_dropout=payload.lora_dropout,
         lora_use_dora=payload.lora_use_dora,
         snapflow_start_epoch=payload.snapflow_start_epoch,
+        early_stopping_patience=payload.early_stopping_patience,
+        early_stopping_min_delta=payload.early_stopping_min_delta or 0.0,
         device_type=str(device.type) if device else None,
         device_index=device.index if device else None,
         image_key_reorder_map=payload.image_key_reorder_map,

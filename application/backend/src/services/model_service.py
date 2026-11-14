@@ -105,4 +105,8 @@ class ModelService:
             lora_use_dora=payload.lora_use_dora if lora_enabled else None,
             snapflow_enabled=payload.snapflow_enabled,
             snapflow_distill_epochs=snapflow_distill_epochs,
+            early_stopping_patience=payload.early_stopping_patience,
+            early_stopping_min_delta=(
+                (payload.early_stopping_min_delta or 0.0) if payload.early_stopping_patience is not None else None
+            ),
         )

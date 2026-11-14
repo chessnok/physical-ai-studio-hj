@@ -26,17 +26,24 @@ from unittest.mock import MagicMock, patch
 import pytest
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from pydantic import SecretStr, ValidationError
+from tests.old_trainer import EARLY_STOPPING_FIELDS, old_trainer_rejection
 
 from api.policies import _available_policy_classes
 from training import RunOptions, TrainingJobSpec
 from training.job import (
     CHECKPOINT_NAME,
+    EARLY_STOPPING_SUMMARY_NAME,
+    EARLY_STOPPING_UNSUPPORTED_MESSAGE,
     EXPORTS_DIRNAME,
     PEFT_POLICIES,
     PRETRAINED_BASE_CHECKPOINTS,
     SNAPFLOW_CHECKPOINT_NAME,
+    EarlyStoppingSummary,
     _load_policy_from_checkpoint,
     build_policy,
+    completion_message,
+    explain_trainer_rejection,
+    read_early_stopping_summary,
     resolve_checkpoint,
     run_training_job,
 )
@@ -127,6 +134,124 @@ class TestTrainingJobSpec:
         """Distilling from step zero distils an untrained policy."""
         with pytest.raises(ValidationError):
             TrainingJobSpec(policy="pi05", max_epochs=5, snapflow_start_epoch=0)
+
+
+class TestEarlyStoppingSpec:
+    """Early stopping is opt-in, and a spec without it must still reach a trainer that predates it."""
+
+    def test_early_stopping_is_off_by_default(self) -> None:
+        spec = TrainingJobSpec(policy="act")
+
+        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (None, 0.0)
+
+    def test_an_ordinary_spec_serializes_without_early_stopping_fields(self) -> None:
+        dumped = TrainingJobSpec(policy="act").model_dump(mode="json")
+
+        assert not set(EARLY_STOPPING_FIELDS) & set(dumped)
+
+    def test_an_ordinary_spec_validates_on_a_trainer_without_early_stopping(self) -> None:
+        """The Modal app, AWS Batch image, or trainer service may run older code."""
+        spec = TrainingJobSpec(policy="pi05", max_epochs=8, snapflow_start_epoch=5, lora_enabled=True)
+
+        assert old_trainer_rejection(spec.model_dump_json(exclude={"run_options"})) is None
+
+    def test_an_early_stopping_spec_is_rejected_by_such_a_trainer_and_explained(self) -> None:
+        """Never silently trained without it: the old trainer refuses, and Studio says why."""
+        spec = TrainingJobSpec(policy="act", early_stopping_patience=5)
+
+        rejection = old_trainer_rejection(spec.model_dump_json(exclude={"run_options"}))
+
+        assert rejection is not None
+        assert explain_trainer_rejection(rejection) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
+
+    @pytest.mark.parametrize(
+        "error_text",
+        [
+            None,
+            "",
+            "CUDA out of memory",
+            "1 validation error for TrainingJobSpec\nlearning_rate\n  Extra inputs are not permitted",
+        ],
+    )
+    def test_other_failures_are_left_alone(self, error_text: str | None) -> None:
+        assert explain_trainer_rejection(error_text) is None
+
+    def test_an_early_stopping_spec_round_trips_through_json(self) -> None:
+        spec = TrainingJobSpec(policy="act", early_stopping_patience=4, early_stopping_min_delta=0.01)
+
+        dumped = spec.model_dump(mode="json")
+        assert (dumped["early_stopping_patience"], dumped["early_stopping_min_delta"]) == (4, 0.01)
+        assert TrainingJobSpec.model_validate_json(spec.model_dump_json()) == spec
+
+    def test_a_zero_min_delta_is_not_sent(self) -> None:
+        """0 is the default on both ends; leaving it out keeps the wire minimal."""
+        dumped = TrainingJobSpec(policy="act", early_stopping_patience=4).model_dump(mode="json")
+
+        assert dumped["early_stopping_patience"] == 4
+        assert "early_stopping_min_delta" not in dumped
+
+    def test_min_delta_without_patience_is_dropped(self) -> None:
+        """It has no effect without early stopping, so it must not make the spec unsendable to an old trainer."""
+        spec = TrainingJobSpec(policy="act", early_stopping_min_delta=0.5)
+
+        assert spec.early_stopping_min_delta == 0.0
+        assert old_trainer_rejection(spec.model_dump_json(exclude={"run_options"})) is None
+
+    def test_early_stopping_needs_a_validation_split(self) -> None:
+        with pytest.raises(ValidationError, match="needs a validation split"):
+            TrainingJobSpec(policy="act", val_split=0.0, early_stopping_patience=3)
+
+    def test_no_validation_split_is_fine_without_early_stopping(self) -> None:
+        assert TrainingJobSpec(policy="act", val_split=0.0).early_stopping_patience is None
+
+    @pytest.mark.parametrize("invalid", [{"early_stopping_patience": 0}, {"early_stopping_min_delta": -0.1}])
+    def test_out_of_range_early_stopping_values_are_rejected(self, invalid: dict) -> None:
+        with pytest.raises(ValidationError):
+            TrainingJobSpec(policy="act", **{"early_stopping_patience": 3, **invalid})
+
+
+class TestEarlyStoppingSummary:
+    @staticmethod
+    def _write(model_dir: Path, **fields: Any) -> None:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        summary = EarlyStoppingSummary(patience=3, min_delta=0.0, max_epochs=30, epochs_trained=12, **fields)
+        (model_dir / EARLY_STOPPING_SUMMARY_NAME).write_text(summary.model_dump_json())
+
+    def test_a_model_without_a_summary_simply_finished(self, tmp_path: Path) -> None:
+        assert read_early_stopping_summary(tmp_path) is None
+        assert completion_message(tmp_path) == "Training finished"
+
+    def test_an_early_stop_is_named_in_the_completion_message(self, tmp_path: Path) -> None:
+        self._write(tmp_path, stopped_after_epoch=12, reason="patience_exhausted", best_epoch=9, best_val_loss=0.51943)
+
+        assert completion_message(tmp_path) == (
+            "Training finished: stopped early after epoch 12 of 30; best epoch 9 (val/loss 0.5194)"
+        )
+
+    def test_a_run_early_stopping_never_ended_simply_finished(self, tmp_path: Path) -> None:
+        self._write(tmp_path, best_epoch=30, best_val_loss=0.4)
+
+        assert completion_message(tmp_path) == "Training finished"
+
+    def test_a_snapflow_run_says_distillation_followed(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            stopped_after_epoch=6,
+            best_epoch=4,
+            best_val_loss=0.3,
+            flow_matching_epochs=27,
+            distillation_epochs=3,
+        )
+
+        assert completion_message(tmp_path) == (
+            "Training finished: flow matching stopped early after epoch 6 of 27; best epoch 4 (val/loss 0.3); "
+            "then distilled for 3 epochs"
+        )
+
+    def test_an_unreadable_summary_does_not_fail_the_job(self, tmp_path: Path) -> None:
+        (tmp_path / EARLY_STOPPING_SUMMARY_NAME).write_text("{not json")
+
+        assert completion_message(tmp_path) == "Training finished"
 
 
 class TestBuildPolicy:
@@ -693,6 +818,104 @@ class TestRunTrainingJob:
 
 
 SNAPFLOW_SPEC = TrainingJobSpec(policy="pi05", max_epochs=8, snapflow_start_epoch=5)
+
+
+class TestEarlyStoppingRun:
+    """How ``run_training_job`` wires early stopping; the stopping itself is in test_early_stopping.py."""
+
+    @staticmethod
+    def _early_stopping_callback(trainer_class: MagicMock) -> Any | None:
+        from training.early_stopping import ValLossEarlyStopping
+
+        callbacks = trainer_class.call_args.kwargs["callbacks"]
+        return next((c for c in callbacks if isinstance(c, ValLossEarlyStopping)), None)
+
+    @staticmethod
+    def _stopped_summary() -> EarlyStoppingSummary:
+        return EarlyStoppingSummary(
+            patience=2,
+            min_delta=0.0,
+            max_epochs=20,
+            epochs_trained=7,
+            stopped_after_epoch=7,
+            reason="patience_exhausted",
+            best_epoch=5,
+            best_val_loss=0.25,
+        )
+
+    def test_an_ordinary_run_gets_no_early_stopping(self, tmp_path: Path) -> None:
+        from lightning.pytorch.callbacks import EarlyStopping
+
+        trainer_class = _run(TrainingJobSpec(policy="act"), tmp_path)
+
+        callbacks = trainer_class.call_args.kwargs["callbacks"]
+        assert not any(isinstance(callback, EarlyStopping) for callback in callbacks)
+        assert not (tmp_path / "model" / EARLY_STOPPING_SUMMARY_NAME).exists()
+
+    def test_early_stopping_watches_val_loss_with_the_spec_settings(self, tmp_path: Path) -> None:
+        spec = TrainingJobSpec(policy="act", early_stopping_patience=4, early_stopping_min_delta=0.01)
+
+        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=self._stopped_summary()):
+            trainer_class = _run(spec, tmp_path)
+
+        callback = self._early_stopping_callback(trainer_class)
+        assert callback is not None
+        assert (callback.monitor, callback.mode, callback.patience) == ("val/loss", "min", 4)
+        # Lightning stores min_delta signed by mode; the magnitude is what was asked for.
+        assert abs(callback.min_delta) == pytest.approx(0.01)
+        # It ranks epochs by the metric the published checkpoint is chosen by.
+        checkpoint = next(
+            c for c in trainer_class.call_args.kwargs["callbacks"] if type(c).__name__ == "ModelCheckpoint"
+        )
+        assert (checkpoint.monitor, checkpoint.mode) == (callback.monitor, callback.mode)
+
+    def test_on_a_snapflow_run_it_is_tied_to_the_phase_callback(self, tmp_path: Path) -> None:
+        spec = TrainingJobSpec(policy="pi05", max_epochs=8, snapflow_start_epoch=5, early_stopping_patience=2)
+
+        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=self._stopped_summary()):
+            trainer_class = _run(spec, tmp_path)
+
+        callback = self._early_stopping_callback(trainer_class)
+        snapflow = next(
+            c for c in trainer_class.call_args.kwargs["callbacks"] if type(c).__name__ == "SnapFlowPhaseCallback"
+        )
+        assert callback is not None
+        assert callback._snapflow is snapflow
+
+    def test_an_early_stop_is_recorded_in_the_model_and_reported(self, tmp_path: Path) -> None:
+        report = MagicMock()
+        spec = TrainingJobSpec(policy="act", early_stopping_patience=2)
+
+        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=self._stopped_summary()):
+            _run(spec, tmp_path, report=report)
+
+        assert read_early_stopping_summary(tmp_path / "model") == self._stopped_summary()
+        report.assert_any_call(99, "Stopped early after epoch 7 of 20; best epoch 5 (val/loss 0.25)", {})
+        # The checkpoint and export still follow, as for a run that used all its epochs.
+        assert (tmp_path / "model" / CHECKPOINT_NAME).is_file()
+
+    def test_a_run_early_stopping_did_not_end_records_that_too(self, tmp_path: Path) -> None:
+        report = MagicMock()
+        summary = self._stopped_summary().model_copy(update={"stopped_after_epoch": None, "reason": None})
+
+        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=summary):
+            _run(TrainingJobSpec(policy="act", early_stopping_patience=2), tmp_path, report=report)
+
+        assert read_early_stopping_summary(tmp_path / "model") == summary
+        assert not any("Stopped early" in str(call.args[1]) for call in report.call_args_list)
+
+    def test_a_summary_that_cannot_be_built_does_not_fail_the_run(self, tmp_path: Path) -> None:
+        with patch("training.early_stopping.ValLossEarlyStopping.summary", side_effect=RuntimeError("boom")):
+            _run(TrainingJobSpec(policy="act", early_stopping_patience=2), tmp_path)
+
+        assert (tmp_path / "model" / CHECKPOINT_NAME).is_file()
+        assert not (tmp_path / "model" / EARLY_STOPPING_SUMMARY_NAME).exists()
+
+    def test_a_canceled_run_records_nothing(self, tmp_path: Path) -> None:
+        with patch("training.early_stopping.ValLossEarlyStopping.summary") as summary:
+            _run(TrainingJobSpec(policy="act", early_stopping_patience=2), tmp_path, should_stop=True)
+
+        summary.assert_not_called()
 
 
 class TestSnapFlowDistillation:

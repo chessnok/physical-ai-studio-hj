@@ -16,7 +16,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from schemas.job import LocalTrainJobPayload, RemoteTrainJobPayload, TrainingTarget
+from schemas.job import LocalTrainJobPayload, RemoteTrainJobPayload, TrainingTarget, TrainJobPayloadAdapter
 
 
 def _base_kwargs() -> dict:
@@ -192,3 +192,49 @@ class TestTrainingOptions:
 
     def test_image_augmentation_can_be_enabled(self) -> None:
         assert LocalTrainJobPayload(**_base_kwargs(), augment_images=True).augment_images is True
+
+
+class TestEarlyStopping:
+    """Opt-in, validated at submission, and invisible in stored payloads while off."""
+
+    def test_early_stopping_is_off_by_default(self) -> None:
+        payload = LocalTrainJobPayload(**_base_kwargs())
+
+        assert (payload.early_stopping_patience, payload.early_stopping_min_delta) == (None, None)
+
+    def test_a_payload_without_early_stopping_is_stored_without_its_fields(self) -> None:
+        """Payloads forbid unknown fields, so a stored job must still load in a Studio without the feature."""
+        stored = LocalTrainJobPayload(**_base_kwargs()).model_dump(mode="json")
+
+        assert "early_stopping_patience" not in stored
+        assert "early_stopping_min_delta" not in stored
+
+    @pytest.mark.parametrize("payload_class", [LocalTrainJobPayload, RemoteTrainJobPayload])
+    def test_an_early_stopping_payload_round_trips(self, payload_class: type) -> None:
+        extra = {"remote_trainer_id": uuid4()} if payload_class is RemoteTrainJobPayload else {}
+        payload = payload_class(**_base_kwargs(), early_stopping_patience=5, early_stopping_min_delta=0.001, **extra)
+
+        stored = payload.model_dump(mode="json")
+
+        assert (stored["early_stopping_patience"], stored["early_stopping_min_delta"]) == (5, 0.001)
+        assert TrainJobPayloadAdapter.validate_python(stored) == payload
+
+    def test_min_delta_is_optional(self) -> None:
+        payload = LocalTrainJobPayload(**_base_kwargs(), early_stopping_patience=5)
+
+        assert payload.early_stopping_min_delta is None
+        assert "early_stopping_min_delta" not in payload.model_dump(mode="json")
+
+    def test_min_delta_without_patience_is_dropped(self) -> None:
+        payload = LocalTrainJobPayload(**_base_kwargs(), early_stopping_min_delta=0.5)
+
+        assert payload.early_stopping_min_delta is None
+
+    def test_early_stopping_without_a_validation_split_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="needs a validation split"):
+            LocalTrainJobPayload(**_base_kwargs(), val_split=0.0, early_stopping_patience=5)
+
+    @pytest.mark.parametrize("invalid", [{"early_stopping_patience": 0}, {"early_stopping_min_delta": -1.0}])
+    def test_out_of_range_values_are_rejected(self, invalid: dict) -> None:
+        with pytest.raises(ValidationError):
+            LocalTrainJobPayload(**{**_base_kwargs(), "early_stopping_patience": 5, **invalid})

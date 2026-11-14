@@ -255,6 +255,30 @@ class TrainJobPayloadBase(BaseModel):
             "max_epochs teacher run. Ignored when snapflow_enabled is false."
         ),
     )
+    # Left out of the stored payload while early stopping is off, so a job
+    # created by this version still loads in a Studio without the feature
+    # (payloads forbid unknown fields).
+    early_stopping_patience: int | None = Field(
+        default=None,
+        ge=1,
+        le=10_000,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Stop training once val/loss has not improved for this many epochs in a row; null (default) "
+            "trains for the full max_epochs. Needs val_split > 0. The published model is the best epoch "
+            "either way. With SnapFlow, only the flow-matching phase is stopped early; distillation then "
+            "starts at once and runs its full snapflow_distill_epochs."
+        ),
+    )
+    early_stopping_min_delta: float | None = Field(
+        default=None,
+        ge=0.0,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Smallest val/loss decrease that counts as an improvement; null means 0 (any decrease). "
+            "Ignored unless early stopping is on."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_lora(self) -> "TrainJobPayloadBase":
@@ -291,6 +315,27 @@ class TrainJobPayloadBase(BaseModel):
             msg = (
                 f"SnapFlow distillation is not available for policy {self.policy!r}; "
                 f"it requires a flow-matching policy ({sorted(SNAPFLOW_POLICIES)})."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_early_stopping(self) -> "TrainJobPayloadBase":
+        """Reject early stopping without a validation split; drop a min_delta that has no effect.
+
+        Returns:
+            The validated payload.
+
+        Raises:
+            ValueError: If early stopping is on with ``val_split`` 0.
+        """
+        if self.early_stopping_patience is None:
+            self.early_stopping_min_delta = None
+            return self
+        if self.val_split <= 0:
+            msg = (
+                "Early stopping watches val/loss, which needs a validation split: "
+                "set val_split above 0 or turn early stopping off."
             )
             raise ValueError(msg)
         return self
