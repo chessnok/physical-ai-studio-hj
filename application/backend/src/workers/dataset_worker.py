@@ -17,6 +17,7 @@ loses the dataset, so the parent waits long for it (``stop_timeout_s``).
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -45,11 +46,16 @@ MIN_EPISODE_FRAMES = 3
 And a depth video (libx265) of one or two frames often fails to mux into mp4."""
 PAIR_READS = 3
 """How often a color image and its depth map are read again when a camera wrote between the two reads."""
-MAX_LAG_S = 0.2
-"""How far an episode's rows may fall behind its clock before it is discarded.
+MAX_LAG_S = float(os.environ.get("PHYSICALAI_RECORD_MAX_LAG_S", "0.5"))
+MAX_LAG_FRACTION = float(os.environ.get("PHYSICALAI_RECORD_MAX_LAG_FRACTION", "0.03"))
+"""How far an episode's rows may fall behind its clock before it is discarded:
+``max(MAX_LAG_S, MAX_LAG_FRACTION * elapsed)``.
 
 Rows are stamped ``frame_index / fps``: a tick that is missed (the computer could not keep up)
-shortens the episode's recorded time, so actions and frames would replay too fast."""
+shortens the episode's recorded time, so actions and frames would replay too fast. Small hiccups
+(browser, GC) add up over a long episode: a fixed 0.2 s limit discarded one-minute episodes that
+were only 0.3-0.7 % fast, which does not matter for training. A relative limit keeps those and still
+discards real stalls (half a second or more) and episodes replaying more than 3 % too fast."""
 
 
 class Empty(BaseModel):
@@ -142,8 +148,9 @@ class Recorder:
         """Why the open episode cannot be kept because its rows fell behind its clock, or ``None``."""
         if self.fps is None or self.frames == 0:
             return None
-        lag = (time.monotonic() - self._started_at) - (self.frames - 1) / self.fps
-        if lag <= MAX_LAG_S:
+        elapsed = time.monotonic() - self._started_at
+        lag = elapsed - (self.frames - 1) / self.fps
+        if lag <= max(MAX_LAG_S, MAX_LAG_FRACTION * elapsed):
             return None
         return (
             f"Episode discarded: recording fell {lag * 1000:.0f} ms behind its {self.fps:g} fps clock (the computer "

@@ -192,11 +192,23 @@ def test_a_recording_that_falls_behind_its_clock_is_discarded(dropping_recorder,
         recorder.record_frame()
     assert recorder.status().is_recording
 
-    clock[0] += 0.5  # the computer stalled for half a second: 15 ticks missed
+    clock[0] += 1.0  # the computer stalled for a second: 30 ticks missed
 
     recorder.record_frame()
     assert not recorder.status().is_recording
     assert "behind its 30 fps clock" in recorder.publish.call_args.args[0].error
+
+
+def test_small_hiccups_over_a_long_episode_are_kept(dropping_recorder, monkeypatch):
+    """0.4 s of accumulated hiccups over a one-minute episode (0.7 % fast) must not discard it."""
+    recorder = dropping_recorder
+    clock = [100.0]
+    monkeypatch.setattr("workers.dataset_worker.time.monotonic", lambda: clock[0])
+    recorder.record_frame()
+    for i in range(1, 1800):  # 60 s at 30 fps
+        clock[0] += 1 / 30 + (0.1 if i % 450 == 0 else 0.0)  # four 0.1 s hiccups
+        recorder.record_frame()
+    assert recorder.status().is_recording
 
 
 def test_a_saved_episode_whose_videos_do_not_match_is_flagged(dropping_recorder):
