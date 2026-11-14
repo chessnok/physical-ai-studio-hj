@@ -13,6 +13,10 @@ import { readSnapshotLabel, SnapshotLabel, writeSnapshotLabel } from './state-sn
 const SNAPSHOT_TOAST = { timeout: 8_000 };
 const SNAPSHOT_ERROR_TOAST = { timeout: 10_000 };
 
+/** "Defective", "Good", or "Unlabelled" for a snapshot taken before labels existed. */
+export const labelOf = (snapshot: Pick<SchemaStateSnapshot, 'defective'>): string =>
+    snapshot.defective == null ? 'Unlabelled' : snapshot.defective ? 'Defective' : 'Good';
+
 /** 'Defective snapshot "scratch" saved to …: top (color, depth), arm (color); follower and leader joints.' */
 export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
     const cameras = snapshot.cameras
@@ -27,9 +31,8 @@ export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
         robots !== '' ? `${robots} joints` : 'no joints',
     ];
     const warnings = (snapshot.warnings ?? []).length > 0 ? ` ${(snapshot.warnings ?? []).join(' ')}` : '';
-    const kind = snapshot.defective == null ? 'Unlabelled' : snapshot.defective ? 'Defective' : 'Good';
     const comment = snapshot.comment ? ` "${snapshot.comment}"` : '';
-    return `${kind} snapshot${comment} saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
+    return `${labelOf(snapshot)} snapshot${comment} saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
 };
 
 /** The list of a project's snapshots; captures and label changes refresh it. */

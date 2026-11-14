@@ -576,6 +576,101 @@ describe('recent snapshots', () => {
     });
 });
 
+describe('viewing and deleting a recent snapshot', () => {
+    const WITH_DEPTH: SchemaStateSnapshot = {
+        ...SNAPSHOT,
+        defective: true,
+        comment: 'dent',
+        cameras: [
+            {
+                name: 'Top',
+                key: 'top',
+                files: ['top.color.png', 'top.depth.png', 'top.depth_preview.png'],
+                color: true,
+                depth: true,
+            },
+            { name: 'Arm', key: 'arm', files: ['arm.color.png'], color: true, depth: false },
+        ],
+    };
+
+    it('shows a thumbnail, and all images with the label in a preview', async () => {
+        mockSettings();
+        mockRecent([WITH_DEPTH]);
+        const user = userEvent.setup();
+        render(<Controls />);
+
+        const list = await openRecent(user);
+        const thumbnail = await within(list).findByRole('button', { name: 'Show snapshot of 17:15:00.123' });
+        expect(thumbnail.querySelector('img')?.getAttribute('src')).toContain(
+            '/api/projects/project-1/state_snapshots/20261113-171500-123/files/top.color.png'
+        );
+        await user.click(thumbnail);
+
+        const preview = await screen.findByRole('dialog', { name: 'Snapshot of 17:15:00.123' });
+        expect(
+            within(preview)
+                .getAllByRole('img')
+                .map((image) => image.getAttribute('alt'))
+        ).toEqual(['Top, color', 'Top, depth', 'Arm, color']);
+        expect(within(preview).getByRole('img', { name: 'Top, depth' }).getAttribute('src')).toContain(
+            '/files/top.depth_preview.png'
+        );
+        expect(within(preview).getByText(/^Defective, "dent"\. Captured /)).toBeInTheDocument();
+
+        await user.click(within(preview).getByRole('button', { name: 'Close' }));
+        await waitFor(() =>
+            expect(screen.queryByRole('dialog', { name: 'Snapshot of 17:15:00.123' })).not.toBeInTheDocument()
+        );
+        expect(screen.getByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' })).toBeInTheDocument();
+    });
+
+    it('moves a snapshot to the trash after a confirmation that keeps Escape from the page', async () => {
+        mockSettings();
+        const { listRequests } = mockRecent([WITH_DEPTH]);
+        const deletes: string[] = [];
+        server.use(
+            http.delete('/api/projects/{project_id}/state_snapshots/{snapshot_id}', ({ params }) => {
+                deletes.push(String(params.snapshot_id));
+                server.use(http.get('/api/projects/{project_id}/state_snapshots', () => HttpResponse.json([])));
+                return HttpResponse.json({
+                    snapshot_id: String(params.snapshot_id),
+                    moved_to: `/storage/state_snapshots_trash/20261114-120000/project-1/${params.snapshot_id}`,
+                    csv_warning: null,
+                });
+            })
+        );
+        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
+        const startEpisode = rs.fn();
+        const discardEpisode = rs.fn();
+        const user = userEvent.setup();
+        render(
+            <Controls>
+                <RecordingHotkeys start={startEpisode} discard={discardEpisode} />
+            </Controls>
+        );
+
+        const list = await openRecent(user);
+        const trash = await within(list).findByRole('button', { name: 'Move snapshot of 17:15:00.123 to trash' });
+        await user.click(trash);
+        await screen.findByRole('alertdialog');
+        await user.keyboard('{Escape}');
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+        expect(discardEpisode).not.toHaveBeenCalled();
+        expect(deletes).toEqual([]);
+
+        await user.click(trash);
+        const confirm = await screen.findByRole('alertdialog');
+        await user.click(within(confirm).getByRole('button', { name: 'Move to trash' }));
+
+        await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
+        expect(deletes).toEqual([SNAPSHOT.snapshot_id]);
+        expect(notify.mock.calls[0][0]).toContain('moved to trash: /storage/state_snapshots_trash/');
+        await within(list).findByText('No snapshots yet.');
+        expect(listRequests.length).toBeGreaterThanOrEqual(1);
+        expect(startEpisode).not.toHaveBeenCalled();
+    });
+});
+
 describe('readSnapshotLabel', () => {
     it('starts unlabelled from nothing or from a value it does not understand', () => {
         expect(readSnapshotLabel('project-1')).toEqual({ defective: false, comment: '' });

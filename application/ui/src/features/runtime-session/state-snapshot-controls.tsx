@@ -24,6 +24,7 @@ import { SchemaStateSnapshot, SchemaStateSnapshotLabelUpdate } from '../../api/o
 import { formatKeyCombo, keyboardEventToCombo } from '../hotkeys/key-combo';
 import { snapshotListKey, useStateSnapshot } from './state-snapshot';
 import { COMMENT_MAX_LENGTH } from './state-snapshot-label';
+import { SnapshotThumbnail, TrashSnapshot } from './state-snapshot-viewer';
 
 const RECENT_SNAPSHOTS = 8;
 const ERROR_TOAST = { timeout: 10_000 };
@@ -150,8 +151,12 @@ const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot
 
     return (
         <Flex direction='column' gap='size-50'>
-            <Flex alignItems='center' justifyContent='space-between' gap='size-100'>
-                <Text>{time}</Text>
+            <Flex alignItems='center' gap='size-100'>
+                <SnapshotThumbnail project_id={project_id} snapshot={snapshot} time={time} />
+                <Text flex>{time}</Text>
+                <TrashSnapshot project_id={project_id} snapshot={snapshot} time={time} />
+            </Flex>
+            <Flex alignItems='center' justifyContent='end' gap='size-100'>
                 {defective === null ? (
                     <Flex alignItems='center' gap='size-100'>
                         <Text>Unlabelled</Text>

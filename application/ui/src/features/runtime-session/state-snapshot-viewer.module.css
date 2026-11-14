@@ -1,0 +1,44 @@
+.thumbnail {
+    padding: 0;
+    border: 1px solid var(--spectrum-global-color-gray-400);
+    border-radius: var(--spectrum-alias-border-radius-regular);
+    background: var(--spectrum-global-color-gray-50);
+    cursor: zoom-in;
+    line-height: 0;
+    flex: none;
+}
+
+.thumbnail:focus-visible {
+    outline: 2px solid var(--spectrum-global-color-blue-400);
+    outline-offset: 1px;
+}
+
+.thumbnail img {
+    display: block;
+    width: 72px;
+    height: 41px;
+    object-fit: cover;
+}
+
+.images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spectrum-global-dimension-size-200);
+}
+
+.figure {
+    margin: 0;
+    flex: 1 1 360px;
+    max-width: 100%;
+}
+
+.figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: black;
+}
+
+.figure figcaption {
+    margin-top: var(--spectrum-global-dimension-size-50);
+}
