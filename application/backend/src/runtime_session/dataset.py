@@ -141,6 +141,26 @@ def slow_cameras_warning(cameras: Iterable[Camera], fps: int) -> str | None:
     )
 
 
+def unrecorded_cameras_warning(dataset: Dataset, spec: FeatureSpec) -> str | None:
+    """Why some of the session's cameras or depth maps will not be recorded into ``dataset``, or ``None``.
+
+    A dataset records the cameras it was first recorded with; the session's others are left
+    out, such as the depth of a RealSense switched to "Color + depth" after its first episodes.
+    """
+    recorded = dataset_spec(dataset)
+    if recorded is None:
+        return None
+    missing = [key for key in spec.observations if key not in recorded.observations]
+    if not missing:
+        return None
+    kinds = ["depth map" if spec.observations[key].is_depth else "camera" for key in missing]
+    listed = ", ".join(f"{kind} {key!r}" for kind, key in zip(kinds, missing, strict=True))
+    return (
+        f"Dataset {dataset.name!r} was recorded without {listed}: it will not be recorded. "
+        "Record into a new dataset to keep it."
+    )
+
+
 def lerobot_features(spec: FeatureSpec) -> dict[str, Any]:
     """The LeRobot feature metadata a new dataset is created with, from the session's spec."""
     # Imported here: lerobot is heavy, and only the dataset worker's process needs it.
@@ -188,6 +208,8 @@ class Recording:
         )
         self._session_id = session_id
         self._store = store
+        self.spec = store.spec
+        """The session's features, of which the recording records those the dataset has."""
         self._stack: AsyncExitStack | None = None
         self._started = False
 

@@ -41,7 +41,7 @@ from runtime_session.bus import EVENTS, Bus, BusRequestError, command_key, publi
 from runtime_session.controls import build_control
 from runtime_session.controls.base import CHANGED as CONTROL_CHANGED
 from runtime_session.dataset import COMPONENT as DATASET
-from runtime_session.dataset import Recording, dataset_spec, slow_cameras_warning
+from runtime_session.dataset import Recording, dataset_spec, slow_cameras_warning, unrecorded_cameras_warning
 from runtime_session.environment import COMPONENT as ENVIRONMENT
 from runtime_session.environment import RELOAD, Environment, describe_environment
 from runtime_session.model import COMPONENT as MODEL
@@ -525,13 +525,18 @@ class RuntimeSession:
             recording = await self._dataset.load(self._recording(dataset, environment.robot_type, fps))
             logger.info("Session {} records into dataset {!r}", self.id, dataset.name)
         self._emit(StateMessage(data=self.state()))
-        if warning := slow_cameras_warning(environment.environment.description.cameras.values(), recording.fps):
-            logger.warning("Session {}: {}", self.id, warning)
-            self._emit(
-                ErrorMessage(
-                    component="dataset", message=warning, error_code="camera_fps_below_dataset_fps", session_alive=True
+        warnings = {
+            "camera_fps_below_dataset_fps": slow_cameras_warning(
+                environment.environment.description.cameras.values(), recording.fps
+            ),
+            "cameras_not_recorded": unrecorded_cameras_warning(dataset, recording.spec),
+        }
+        for error_code, warning in warnings.items():
+            if warning is not None:
+                logger.warning("Session {}: {}", self.id, warning)
+                self._emit(
+                    ErrorMessage(component="dataset", message=warning, error_code=error_code, session_alive=True)
                 )
-            )
 
     def _recording(self, dataset: Dataset, robot_type: str, fps: int | None) -> Recording:
         # The store is there with any environment, even one that failed to connect.

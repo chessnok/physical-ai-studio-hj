@@ -597,3 +597,21 @@ async def test_recording_faster_than_a_camera_warns_that_frames_repeat(new_sessi
     assert len(warnings) == 1
     assert "'Cam 0' (15 fps)" in warnings[0].message
     assert warnings[0].session_alive
+
+
+def test_cameras_a_dataset_was_recorded_without_are_named() -> None:
+    from runtime_session.dataset import unrecorded_cameras_warning
+    from runtime_session.store import FeatureSpec
+
+    dataset = _dataset()
+    spec = FeatureSpec(
+        ("shoulder_pan.pos", "gripper.pos"), {"top": ImageSpec(120, 160), "top_depth": ImageSpec.depth(60, 80)}
+    )
+    assert unrecorded_cameras_warning(dataset, spec) is None  # a new dataset records them all
+    _write_info(dataset, ["shoulder_pan.pos", "gripper.pos"], {"top": [120, 160, 3]})
+
+    warning = unrecorded_cameras_warning(dataset, spec)
+
+    assert warning is not None
+    assert "without depth map 'top_depth'" in warning
+    assert "new dataset" in warning
