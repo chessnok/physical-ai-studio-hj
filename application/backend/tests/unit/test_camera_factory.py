@@ -36,6 +36,7 @@ def _usb():
 def test_realsense_is_captured_with_studio_rgbd_camera_and_its_output_type(output_type):
     config = build_capture_config(_realsense(output_type))
     assert config.class_path == "utils.realsense_rgbd.RealSenseRGBDCamera"
+    info_path = config.init_args.pop("info_path")
     assert config.init_args == {
         "serial_number": "243622062352",
         "width": 1280,
@@ -43,6 +44,7 @@ def test_realsense_is_captured_with_studio_rgbd_camera_and_its_output_type(outpu
         "fps": 30,
         "output_type": output_type,
     }
+    assert info_path.endswith(f"run/camera-info/243622062352-{output_type}.json")
 
 
 def test_each_realsense_output_type_has_its_own_publisher_service():

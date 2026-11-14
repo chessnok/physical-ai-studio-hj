@@ -141,6 +141,7 @@ class _FakeRealSense:
     """Just enough of pyrealsense2 for one D415 at 1280x720@30 on USB 3."""
 
     def __init__(self, usb_type="3.2"):
+        self.depth_scale = 0.001
         self.enabled: list[tuple] = []
         self.started = self.stopped = False
         self.aligned = 0
@@ -173,6 +174,7 @@ class _FakeRealSense:
         class Pipeline:
             def start(self, config):
                 fake.started = True
+                return fake.profile()
 
             def stop(self):
                 fake.stopped = True
@@ -193,6 +195,34 @@ class _FakeRealSense:
 
         self.context = lambda: SimpleNamespace(query_devices=lambda: [Device()])
         self.config, self.pipeline, self.align = Config, Pipeline, Align
+
+    def profile(self):
+        fake = self
+
+        def stream(width, height, fx):
+            intrinsics = SimpleNamespace(
+                width=width,
+                height=height,
+                fx=fx,
+                fy=fx,
+                ppx=width / 2,
+                ppy=height / 2,
+                model="distortion.brown_conrady",
+                coeffs=[0.0] * 5,
+            )
+            video = SimpleNamespace(get_intrinsics=lambda: intrinsics)
+            return SimpleNamespace(
+                as_video_stream_profile=lambda: video,
+                get_extrinsics_to=lambda _other: SimpleNamespace(
+                    rotation=[1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0], translation=[0.015, 0, 0]
+                ),
+            )
+
+        streams = {"color": stream(1280, 720, 910.0), "depth": stream(1280, 720, 890.0)}
+        sensor = SimpleNamespace(get_depth_scale=lambda: fake.depth_scale)
+        return SimpleNamespace(
+            get_stream=lambda kind: streams[kind], get_device=lambda: SimpleNamespace(first_depth_sensor=lambda: sensor)
+        )
 
     def frameset(self):
         color = np.full((720, 1280, 3), 7, np.uint8)
@@ -265,3 +295,29 @@ class TestRealSenseRGBDCamera:
         ).instantiate(expected_type=Camera)
         assert isinstance(camera, RealSenseRGBDCamera)
         assert camera.output_type == "depth"
+
+
+def test_a_connected_camera_writes_its_intrinsics_for_other_processes(fake_rs, tmp_path):
+    from utils.realsense_rgbd import read_stream_info
+
+    info_path = tmp_path / "camera-info" / "123-both.json"
+    camera = RealSenseRGBDCamera(serial_number="123", output_type="both", info_path=str(info_path))
+    camera.connect()
+    info = read_stream_info(info_path)
+    assert info is not None
+    assert info["depth_aligned_to_color"]
+    assert info["color_intrinsics"]["fx"] == 910.0
+    assert info["depth_sensor_intrinsics"]["fx"] == 890.0
+    assert info["depth_intrinsics"] == info["color_intrinsics"]  # aligned: depth is in the color image
+    assert info["depth_scale_m"] == 0.001
+    assert info["depth_to_color_extrinsics"]["translation_m"] == [0.015, 0, 0]
+    assert (info["serial_number"], info["usb_type"], info["depth_unit"]) == ("123", "3.2", "mm")
+    camera.disconnect()
+
+
+def test_depth_in_another_scale_is_recorded_in_millimetres(fake_rs):
+    fake_rs.depth_scale = 0.0001  # 0.1 mm per unit
+    camera = RealSenseRGBDCamera(serial_number="123", output_type="both")
+    camera.connect()
+    _, depth = unpack_rgbd(camera.read().data)
+    assert np.all(depth == 123)  # 1234 units of 0.1 mm

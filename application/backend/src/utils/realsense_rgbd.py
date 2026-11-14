@@ -21,8 +21,11 @@ selection stay importable (and testable) without the SDK.
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -220,6 +223,8 @@ class RealSenseRGBDCamera(Camera):
         color_mode: Channel order of the color image (``rgb`` or ``bgr``).
         depth_width: Depth sensor width with ``"both"``; chosen automatically when omitted.
         depth_height: Depth sensor height with ``"both"``; chosen automatically when omitted.
+        info_path: Where to write the streams' intrinsics and depth scale as JSON once connected, for
+            other processes (a snapshot, say) that must not open the camera a second time.
     """
 
     def __init__(  # noqa: PLR0913
@@ -233,6 +238,7 @@ class RealSenseRGBDCamera(Camera):
         color_mode: ColorMode = ColorMode.RGB,
         depth_width: int | None = None,
         depth_height: int | None = None,
+        info_path: str | None = None,
     ) -> None:
         super().__init__(color_mode=color_mode)
         if output_type not in OUTPUT_TYPES:
@@ -247,6 +253,10 @@ class RealSenseRGBDCamera(Camera):
         self._fps = fps
         self._output_type: RealSenseOutput = output_type
         self._depth_size = None if depth_width is None or depth_height is None else (depth_width, depth_height)
+        self._info_path = None if info_path is None else Path(info_path)
+        self._depth_to_mm = 1.0
+        """Depth units to millimetres: 1 for the D400 default depth scale of 1 mm."""
+        self.info: dict[str, Any] | None = None
         self._pipeline: Any | None = None
         self._align: Any | None = None
         self._latest: Frame | None = None
@@ -302,7 +312,7 @@ class RealSenseRGBDCamera(Camera):
             config.enable_stream(rs.stream.depth, plan.depth[0], plan.depth[1], rs.format.z16, plan.depth[2])
         pipeline = rs.pipeline()
         try:
-            pipeline.start(config)
+            profile = pipeline.start(config)
         except RuntimeError as error:
             raise CaptureError(
                 f"Could not start {label} with {plan.describe()}: {error}. "
@@ -312,6 +322,11 @@ class RealSenseRGBDCamera(Camera):
         self._align = rs.align(rs.stream.color) if plan.color is not None and plan.depth is not None else None
         self.plan = plan
         self._sequence = 0
+        self.info = _stream_info(rs, profile, device, plan, self._output_type)
+        scale = self.info.get("depth_scale_m")
+        self._depth_to_mm = 1.0 if not isinstance(scale, float) else scale * 1000.0
+        if self._info_path is not None:
+            _write_json(self._info_path, self.info)
         try:
             self._latest = self._process(self._wait(timeout))
         except Exception:
@@ -373,6 +388,8 @@ class RealSenseRGBDCamera(Camera):
             if not depth_frame:
                 raise CaptureError("The frameset has no depth frame")
             depth = np.asanyarray(depth_frame.get_data())
+            if abs(self._depth_to_mm - 1.0) > 1e-6:  # a depth scale other than 1 mm
+                depth = np.clip(np.rint(depth * self._depth_to_mm), 0, 65535).astype(np.uint16)
         self._sequence += 1
         # The SDK reuses its buffers: copy out of them, which packing already does for depth.
         data = pack_rgbd(None if color is None else (color.copy() if depth is None else color), depth)
@@ -411,6 +428,78 @@ class RealSenseRGBDCamera(Camera):
         return sorted(color_modes)
 
 
+def _intrinsics(stream_profile: Any) -> dict[str, Any]:
+    intrinsics = stream_profile.as_video_stream_profile().get_intrinsics()
+    return {
+        "width": intrinsics.width,
+        "height": intrinsics.height,
+        "fx": intrinsics.fx,
+        "fy": intrinsics.fy,
+        "ppx": intrinsics.ppx,
+        "ppy": intrinsics.ppy,
+        "model": str(intrinsics.model),
+        "coeffs": [float(value) for value in intrinsics.coeffs],
+    }
+
+
+def _stream_info(rs: Any, profile: Any, device: Any, plan: StreamPlan, output_type: str) -> dict[str, Any]:
+    """What a reader of the recorded images needs: intrinsics, depth scale and how depth is aligned.
+
+    Best effort: what the SDK cannot tell is left out, and capture goes on without it.
+    """
+    info: dict[str, Any] = {
+        "serial_number": _info(rs, device, "serial_number"),
+        "name": _info(rs, device, "name"),
+        "firmware_version": _info(rs, device, "firmware_version"),
+        "usb_type": _info(rs, device, "usb_type_descriptor"),
+        "output_type": output_type,
+        "color_mode": None if plan.color is None else _mode(plan.color),
+        "depth_mode": None if plan.depth is None else _mode(plan.depth),
+        "depth_aligned_to_color": plan.color is not None and plan.depth is not None,
+        "depth_unit": "mm",
+    }
+    try:
+        if plan.color is not None:
+            info["color_intrinsics"] = _intrinsics(profile.get_stream(rs.stream.color))
+        if plan.depth is not None:
+            depth_stream = profile.get_stream(rs.stream.depth)
+            info["depth_sensor_intrinsics"] = _intrinsics(depth_stream)
+            info["depth_scale_m"] = float(profile.get_device().first_depth_sensor().get_depth_scale())
+            if plan.color is not None:
+                extrinsics = depth_stream.get_extrinsics_to(profile.get_stream(rs.stream.color))
+                info["depth_to_color_extrinsics"] = {
+                    "rotation": [float(value) for value in extrinsics.rotation],
+                    "translation_m": [float(value) for value in extrinsics.translation],
+                }
+            # Depth as recorded: aligned to color, it has the color image's intrinsics.
+            info["depth_intrinsics"] = (
+                info.get("color_intrinsics") if plan.color is not None else info["depth_sensor_intrinsics"]
+            )
+    except (RuntimeError, AttributeError) as error:
+        logger.warning("Could not read RealSense intrinsics: {}", error)
+        info["error"] = str(error)
+    return info
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    """Write ``data`` to ``path`` atomically, so a reader never sees half of it."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix(f".{os.getpid()}.tmp")
+        partial.write_text(json.dumps(data, indent=2))
+        partial.replace(path)
+    except OSError as error:
+        logger.warning("Could not write RealSense stream info to {}: {}", path, error)
+
+
+def read_stream_info(path: Path) -> dict[str, Any] | None:
+    """The stream info a connected :class:`RealSenseRGBDCamera` wrote to ``path``, if any."""
+    try:
+        return cast("dict[str, Any]", json.loads(path.read_text()))
+    except (OSError, ValueError):
+        return None
+
+
 def _find_device(rs: Any, serial: str) -> Any:
     devices = list(rs.context().query_devices())
     for device in devices:
@@ -421,8 +510,8 @@ def _find_device(rs: Any, serial: str) -> Any:
 
 
 def _info(rs: Any, device: Any, field: str) -> str | None:
-    key = getattr(rs.camera_info, field)
-    return str(device.get_info(key)) if device.supports(key) else None
+    key = getattr(rs.camera_info, field, None)
+    return str(device.get_info(key)) if key is not None and device.supports(key) else None
 
 
 def _stream_modes(rs: Any, device: Any) -> tuple[set[Mode], set[Mode]]:

@@ -19,6 +19,7 @@ from utils.v4l2_frame_interval import fix_zero_frame_intervals
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
     from schemas.project_camera import Camera
 
@@ -124,8 +125,22 @@ def build_capture_config(config: Camera) -> Config:
             "height": payload.height,
             "fps": payload.fps,
             "output_type": payload.output_type,
+            "info_path": str(camera_stream_info_path(config)),
         },
     )
+
+
+def camera_stream_info_path(config: Camera) -> Path | None:
+    """Where a RealSense publisher writes its streams' intrinsics and depth scale once connected.
+
+    Read by whoever needs them while the publisher holds the camera, such as a state snapshot.
+    """
+    if config.driver != "realsense":
+        return None
+    from settings import get_settings
+
+    serial = (config.fingerprint or {}).get("serial")
+    return get_settings().storage_dir / "run" / "camera-info" / f"{serial}-{config.payload.output_type}.json"
 
 
 def capture_service_name(config: Camera) -> str | None:
