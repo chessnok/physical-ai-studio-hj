@@ -1,13 +1,29 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Deploy with `modal deploy application/modal/train.py` from the repository root."""
+"""Deploy with `modal deploy application/modal/train.py` from the repository root.
+
+The registry image provides the training environment (Python, PyTorch, the
+``physicalai`` library) together with an upstream copy of the ``trainer`` and
+``training`` packages. The deployment overlays this checkout's own copies of
+those two packages, which :func:`train` puts first on ``sys.path``, so a Modal
+run executes the same training code as the Studio that deployed it (for
+example, the spec fields Studio sends). Redeploy after changing them.
+"""
 
 import os
+import sys
 from pathlib import Path
 from uuid import UUID
 
 import modal
+
+STUDIO_SOURCE_DIR = "/opt/physicalai-studio/src"
+"""Where this checkout's ``trainer`` and ``training`` packages are mounted in the container."""
+
+_OVERLAID_PACKAGES = ("trainer", "training")
+# Parent of this file's package; only meaningful where the app is deployed from.
+_LOCAL_SOURCE_DIR = Path(__file__).resolve().parents[1]
 
 app = modal.App(os.environ.get("PHYSICALAI_MODAL_APP", "physicalai-trainer"))
 volume = modal.Volume.from_name(
@@ -18,6 +34,12 @@ image = modal.Image.from_registry(
     # The trainer image strips pip; Modal needs it to install its container runtime.
     setup_dockerfile_commands=["RUN python -m ensurepip --default-pip"],
 )
+for _package in _OVERLAID_PACKAGES:
+    image = image.add_local_dir(
+        _LOCAL_SOURCE_DIR / _package,
+        f"{STUDIO_SOURCE_DIR}/{_package}",
+        ignore=lambda path: "__pycache__" in Path(path).parts,
+    )
 secret_name = os.environ.get("PHYSICALAI_MODAL_SECRET")
 
 
@@ -34,6 +56,10 @@ secret_name = os.environ.get("PHYSICALAI_MODAL_SECRET")
 def train(job_id: str) -> int:
     """Run the existing batch worker; expose only UUID-named job directories."""
     import shutil
+
+    # Before the first import of either package: the overlaid source wins over the image's copy.
+    if Path(STUDIO_SOURCE_DIR).is_dir() and STUDIO_SOURCE_DIR not in sys.path:
+        sys.path.insert(0, STUDIO_SOURCE_DIR)
 
     from trainer.batch import BatchSettings, LocalDirJobStorage, run
     from trainer.batch.status import BatchJobStatus

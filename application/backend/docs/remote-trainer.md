@@ -387,6 +387,11 @@ turns such a feature on fails on an older trainer instead of silently training
 without it; for early stopping, Studio reports that the trainer has to be
 updated.
 
+The Modal deployment (`src/trainer/modal_app.py`) mounts the deploying
+checkout's `trainer` and `training` packages over the copies in the registry
+image, so a Modal trainer runs the training code of the Studio that deployed
+it. Deploy it again after updating Studio to pick up new training features.
+
 ## Security
 
 - HTTP-uploaded datasets are validated before extraction: ZIP-only, size and

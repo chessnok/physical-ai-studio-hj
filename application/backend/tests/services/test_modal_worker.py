@@ -67,3 +67,57 @@ def test_modal_worker_commits_and_cleans_local_outputs(monkeypatch, tmp_path, jo
     config = app.function.call_args.kwargs
     assert config["timeout"] == 24 * 60 * 60 and config["retries"] == 0
     assert config["volumes"] == {"/training-jobs": volume}
+
+
+def test_modal_image_overlays_this_checkouts_trainer_and_training_code(monkeypatch):
+    """The registry image's copy may be older; a deployment must train with the code Studio speaks."""
+    import sys
+
+    image = MagicMock()
+    image.add_local_dir.return_value = image
+    sdk = SimpleNamespace(App=MagicMock(), Volume=MagicMock(), Image=MagicMock(), Secret=MagicMock())
+    sdk.Image.from_registry.return_value = image
+    sdk.App.return_value.function.side_effect = lambda **kwargs: lambda function: function
+    monkeypatch.setitem(sys.modules, "modal", sdk)
+    source = Path(__file__).parents[2] / "src"
+
+    worker = runpy.run_path(str(source / "trainer" / "modal_app.py"))
+
+    overlays = [(call.args[0], call.args[1]) for call in image.add_local_dir.call_args_list]
+    assert overlays == [
+        (source / "trainer", f"{worker['STUDIO_SOURCE_DIR']}/trainer"),
+        (source / "training", f"{worker['STUDIO_SOURCE_DIR']}/training"),
+    ]
+    assert (source / "training" / "early_stopping.py").is_file()
+    ignore = image.add_local_dir.call_args.kwargs["ignore"]
+    assert ignore(Path("training/__pycache__/job.cpython-313.pyc"))
+    assert not ignore(Path("training/job.py"))
+    assert sdk.App.return_value.function.call_args.kwargs["image"] is image
+
+
+def test_modal_worker_imports_the_overlaid_code_first(monkeypatch, tmp_path):
+    import sys
+
+    app = MagicMock()
+    app.function.side_effect = lambda **kwargs: lambda function: function
+    sdk = SimpleNamespace(App=MagicMock(return_value=app), Volume=MagicMock(), Image=MagicMock(), Secret=MagicMock())
+    monkeypatch.setitem(sys.modules, "modal", sdk)
+    worker = runpy.run_path(str(Path(__file__).parents[2] / "src" / "trainer" / "modal_app.py"))
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    worker["train"].__globals__["STUDIO_SOURCE_DIR"] = str(overlay)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    seen: list[str] = []
+
+    def run(_storage, _settings):
+        seen.append(sys.path[0])
+        return 0
+
+    monkeypatch.setattr("trainer.batch.run", run)
+    monkeypatch.setattr(
+        "trainer.settings.get_settings",
+        lambda: SimpleNamespace(storage_dir=tmp_path, models_dir=tmp_path / "models", archives_dir=tmp_path / "a"),
+    )
+
+    assert worker["train"](str(uuid4())) == 0
+    assert seen == [str(overlay)]
