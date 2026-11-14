@@ -43,6 +43,7 @@ import csv
 import io
 import json
 import os
+import shutil
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -220,6 +221,39 @@ def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> tup
             logger.exception("Changed {} but could not rebuild {}; the next check will", folder.name, CSV_NAME)
             return document, error
         return document, None
+
+
+def trash(project_root: Path, snapshot_id: str, trash_dir: Path) -> tuple[Path, OSError | None]:
+    """Move a snapshot's folder into ``trash_dir`` (not deleted: it can be moved back), then rebuild the index.
+
+    Returns:
+        Where the folder is now, and why the index could not be rebuilt, if it could not; the next
+        capture or download rebuilds it then.
+
+    Raises:
+        FileNotFoundError: There is no such snapshot.
+    """
+    folder = project_root / snapshot_id
+    if folder.resolve().parent != project_root.resolve():
+        raise FileNotFoundError(folder)
+    with locked(project_root):
+        if not folder.is_dir():
+            raise FileNotFoundError(folder)
+        destination = trash_dir / snapshot_id
+        for attempt in range(1, 100):
+            if not destination.exists():
+                break
+            destination = trash_dir / f"{snapshot_id}-{attempt}"
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        (project_root / DIRTY_NAME).touch()
+        shutil.move(folder, destination)
+        logger.info("Moved state snapshot {} to {}", folder, destination)
+        try:
+            _rebuild_locked(project_root)
+        except OSError as error:
+            logger.exception("Moved {} but could not rebuild {}; the next check will", snapshot_id, CSV_NAME)
+            return destination, error
+        return destination, None
 
 
 def write_json(path: Path, document: dict[str, Any]) -> None:

@@ -23,6 +23,7 @@ Every snapshot also gets a row in the project's ``snapshots.csv``
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -47,6 +48,8 @@ if TYPE_CHECKING:
     from schemas.project_camera import Camera
 
 FORMAT = "physicalai-studio/state-snapshot/v1"
+IMAGE_NAME = re.compile(r"\w[\w .+-]*\.(color|depth|depth_preview)\.png")
+"""How a snapshot's image files are named: ``<camera>.color.png``, ``.depth.png``, ``.depth_preview.png``."""
 
 
 @dataclass
@@ -201,6 +204,36 @@ def list_snapshots(project_root: Path, limit: int | None = None) -> list[StateSn
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return snapshots
+
+
+def image_file(project_root: Path, snapshot_id: str, name: str) -> Path:
+    """One of a snapshot's image files: one its ``state.json`` lists, or one named like them.
+
+    Raises:
+        FileNotFoundError: The project has no such snapshot, or the snapshot no such image.
+    """
+    folder = project_root / snapshot_id
+    if folder.resolve().parent != project_root.resolve() or not folder.is_dir():
+        raise FileNotFoundError(folder)
+    if "/" in name or "\\" in name or name.startswith("."):
+        raise FileNotFoundError(name)
+    try:
+        document = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
+        listed = {
+            file
+            for camera in document.get("cameras") or []
+            if isinstance(camera, dict)
+            for file in (camera.get("files") or {}).values()
+            if isinstance(file, str)
+        }
+    except (OSError, ValueError, AttributeError):
+        listed = set()
+    path = folder / name
+    if (name not in listed and IMAGE_NAME.fullmatch(name) is None) or path.resolve().parent != folder.resolve():
+        raise FileNotFoundError(name)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
 
 
 def update_label(

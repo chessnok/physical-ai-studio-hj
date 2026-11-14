@@ -8,11 +8,14 @@ changeable later; ``snapshots.csv`` (:mod:`runtime_session.snapshot_index`) list
 
 import asyncio
 import http
+import mimetypes
+from datetime import datetime
 from pathlib import Path as FilePath
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Path, Query, Response, status
+from fastapi.responses import FileResponse
 
 from api.dependencies import RuntimeSessionRegistryDep
 from build_info import _run_git, get_build_info_async
@@ -21,7 +24,7 @@ from exceptions import RuntimeSessionCommandError
 from runtime_session import snapshot, snapshot_index
 from runtime_session.registry import RuntimeSessionRegistry
 from runtime_session.session import RuntimeSession
-from schemas.state_snapshot import StateSnapshot, StateSnapshotLabel, StateSnapshotLabelUpdate
+from schemas.state_snapshot import StateSnapshot, StateSnapshotLabel, StateSnapshotLabelUpdate, StateSnapshotTrashed
 from settings import get_settings
 
 router = APIRouter(prefix="/api/projects/{project_id}/state_snapshots", tags=["State Snapshots"])
@@ -32,6 +35,14 @@ SNAPSHOT_ID_PATTERN = r"^\d{8}-\d{6}-\d{3}(-\d{1,2})?$"
 
 def _project_root(project_id: UUID) -> FilePath:
     return get_settings().storage_dir / "state_snapshots" / str(project_id)
+
+
+def _not_found(snapshot_id: str) -> StudioError:
+    return StudioError(
+        f"This project has no state snapshot {snapshot_id}.",
+        error_code="state_snapshot_not_found",
+        http_status=http.HTTPStatus.NOT_FOUND,
+    )
 
 
 def _live_session(registry: RuntimeSessionRegistry, project_id: UUID, session_id: str | None) -> RuntimeSession:
@@ -141,8 +152,66 @@ async def update_state_snapshot(
             comment=changes.comment,
         )
     except FileNotFoundError:
+        raise _not_found(snapshot_id) from None
+
+
+@router.delete("/{snapshot_id}")
+async def trash_state_snapshot(
+    project_id: UUID,
+    snapshot_id: Annotated[str, Path(pattern=SNAPSHOT_ID_PATTERN, description="The snapshot's folder name")],
+) -> StateSnapshotTrashed:
+    """Move a snapshot to ``<storage>/state_snapshots_trash/<YYYYmmdd-HHMMSS>/<project>/<snapshot>``.
+
+    Nothing is deleted: moving the folder back (and downloading the CSV) restores it. The snapshot
+    leaves the list and ``snapshots.csv``.
+    """
+    trash_dir = (
+        get_settings().storage_dir
+        / "state_snapshots_trash"
+        / datetime.now().strftime("%Y%m%d-%H%M%S")
+        / str(project_id)
+    )
+    try:
+        moved_to, index_error = await asyncio.to_thread(
+            snapshot_index.trash, _project_root(project_id), snapshot_id, trash_dir
+        )
+    except FileNotFoundError:
+        raise _not_found(snapshot_id) from None
+    return StateSnapshotTrashed(
+        snapshot_id=snapshot_id,
+        moved_to=str(moved_to),
+        csv_warning=None
+        if index_error is None
+        else f"{snapshot_index.CSV_NAME} could not be rewritten ({index_error}); "
+        "the next capture or CSV download brings it up to date.",
+    )
+
+
+@router.get(
+    "/{snapshot_id}/files/{name}",
+    response_class=FileResponse,
+    responses={200: {"content": {"image/png": {}}, "description": "The image file"}},
+)
+async def get_state_snapshot_file(
+    project_id: UUID,
+    snapshot_id: Annotated[str, Path(pattern=SNAPSHOT_ID_PATTERN, description="The snapshot's folder name")],
+    name: Annotated[str, Path(description="An image of the snapshot, such as top.color.png")],
+) -> FileResponse:
+    """One of a snapshot's images: ``<camera>.color.png``, ``.depth.png`` (16-bit, mm) or ``.depth_preview.png``.
+
+    Only files of that snapshot that its ``state.json`` lists or that are named like them.
+    """
+    try:
+        path = await asyncio.to_thread(snapshot.image_file, _project_root(project_id), snapshot_id, name)
+    except FileNotFoundError:
         raise StudioError(
-            f"This project has no state snapshot {snapshot_id}.",
-            error_code="state_snapshot_not_found",
+            f"State snapshot {snapshot_id} has no image {name}.",
+            error_code="state_snapshot_file_not_found",
             http_status=http.HTTPStatus.NOT_FOUND,
         ) from None
+    # A snapshot's images never change once written.
+    return FileResponse(
+        path,
+        media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )

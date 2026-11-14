@@ -46,6 +46,17 @@ class StateSnapshotLabelUpdate(BaseModel):
         return self
 
 
+class StateSnapshotTrashed(BaseModel):
+    """A snapshot moved to the trash: out of the list and the CSV, but kept, to move back by hand."""
+
+    snapshot_id: str
+    moved_to: str = Field(description="Its folder now, under <storage>/state_snapshots_trash/")
+    csv_warning: str | None = Field(
+        default=None,
+        description="Set when snapshots.csv could not be rewritten yet; the next capture or CSV download does",
+    )
+
+
 class SnapshotCamera(BaseModel):
     name: str
     key: str

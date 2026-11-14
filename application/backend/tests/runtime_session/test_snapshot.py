@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -493,3 +494,63 @@ def test_the_list_can_be_limited_to_the_newest(client, live, project) -> None:
 
     assert [item["snapshot_id"] for item in listed] == created[:0:-1]
     assert client.get(_url(project), params={"limit": 0}).status_code == 400
+
+
+# Viewing and deleting.
+
+
+def test_the_api_serves_a_snapshots_images(client, live, project) -> None:
+    created = _capture(client, live, project)
+    files = _url(project, f"/{created['snapshot_id']}/files")
+
+    response = client.get(f"{files}/top.color.png")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert "max-age" in response.headers["cache-control"]
+    assert response.content == (Path(created["path"]) / "top.color.png").read_bytes()
+    assert client.get(f"{files}/top.depth_preview.png").status_code == 200
+    for name in ("state.json", "cam_9.color.png", "top.color.jpg"):
+        response = client.get(f"{files}/{name}")
+        assert response.status_code == 404, name
+        assert response.json()["error_code"] == "state_snapshot_file_not_found"
+    assert client.get(_url(project, "/20261114-000000-000/files/top.color.png")).status_code == 404
+    assert client.get(_url(project, "/not-a-snapshot/files/top.color.png")).status_code == 400
+
+
+def test_only_a_snapshots_own_images_are_served(live, tmp_path) -> None:
+    result = snapshot.write(snapshot.capture(live), tmp_path)
+    project_root, snapshot_id = Path(result.path).parent, result.snapshot_id
+    (project_root / snapshot_id / "evil.color.png").symlink_to(project_root / snapshot_index.CSV_NAME)
+
+    assert snapshot.image_file(project_root, snapshot_id, "cam_0.color.png").is_file()
+    for name in ("../snapshots.csv", "..", "state.json", ".hidden.color.png", "a/b.color.png", "evil.color.png"):
+        with pytest.raises(FileNotFoundError):
+            snapshot.image_file(project_root, snapshot_id, name)
+    with pytest.raises(FileNotFoundError):
+        snapshot.image_file(project_root, "..", "cam_0.color.png")
+
+
+def test_the_api_moves_a_deleted_snapshot_to_the_trash(client, live, project) -> None:
+    kept = _capture(client, live, project, comment="keep")
+    dropped = _capture(client, live, project, comment="part broke")
+
+    response = client.delete(_url(project, f"/{dropped['snapshot_id']}"))
+
+    assert response.status_code == 200
+    assert response.json()["csv_warning"] is None
+    moved = Path(response.json()["moved_to"])
+    # <storage>/state_snapshots_trash/<YYYYmmdd-HHMMSS>/<project>/<snapshot>
+    assert moved.parents[2] == get_settings().storage_dir / "state_snapshots_trash"
+    assert re.fullmatch(r"\d{8}-\d{6}", moved.parents[1].name)
+    assert (moved.parent.name, moved.name) == (str(project), dropped["snapshot_id"])
+    assert json.loads((moved / "state.json").read_text())["comment"] == "part broke"
+    assert (moved / "top.color.png").is_file()
+    assert not Path(dropped["path"]).exists()
+    assert [item["snapshot_id"] for item in client.get(_url(project)).json()] == [kept["snapshot_id"]]
+    assert [row["snapshot_id"] for row in _download(client, project)] == [kept["snapshot_id"]]
+
+    again = client.delete(_url(project, f"/{dropped['snapshot_id']}"))
+    assert again.status_code == 404
+    assert again.json()["error_code"] == "state_snapshot_not_found"
+    assert client.delete(_url(project, "/not-a-snapshot")).status_code == 400

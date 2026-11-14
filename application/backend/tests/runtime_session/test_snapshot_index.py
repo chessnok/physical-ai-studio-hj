@@ -449,3 +449,23 @@ def test_captures_in_several_processes_leave_one_row_each(tmp_path) -> None:
     assert len({row["snapshot_id"] for row in rows}) == workers * count
     assert all(row["comment"].endswith('\n"ok"') and row["defective"] == "true" for row in rows)
     assert not snapshot_index.ensure(tmp_path)
+
+
+def test_trashing_moves_the_folder_and_rebuilds_the_index(tmp_path) -> None:
+    project, trash_dir = tmp_path / "project", tmp_path / "trash" / "20261114-120000" / "project"
+    for index in range(2):
+        snapshot_index.append(project, _save(project, _snapshot_id(index)))
+
+    moved, index_error = snapshot_index.trash(project, _snapshot_id(1), trash_dir)
+    _save(project, _snapshot_id(1))  # the same id again, then trashed in the same second
+    moved_again, _ = snapshot_index.trash(project, _snapshot_id(1), trash_dir)
+
+    assert index_error is None
+    assert moved == trash_dir / _snapshot_id(1)
+    assert moved_again == trash_dir / f"{_snapshot_id(1)}-1"
+    assert (moved / "state.json").is_file()
+    assert [row["snapshot_id"] for row in _rows(project)] == [_snapshot_id(0)]
+    assert not (project / snapshot_index.DIRTY_NAME).exists()
+    for snapshot_id in (_snapshot_id(1), ".."):
+        with pytest.raises(FileNotFoundError):
+            snapshot_index.trash(project, snapshot_id, trash_dir)
