@@ -1,11 +1,14 @@
 """The session's latest state, action and camera frames, in shared memory.
 
-One block per session holds a buffer and a timestamp per feature. Every
-process in the session attaches to it by name and reads or writes without
-locking: a read that overlaps a write can mix two consecutive samples, which
-is acceptable because they are one tick apart. Writers store the values first
-and the timestamp last, and readers read the timestamp first, so a reader
-never mistakes an unwritten feature (NaN timestamp) for zeros.
+One block per session holds a buffer, a timestamp and a sequence number per
+feature. Every process in the session attaches to it by name and reads or
+writes without locking, through a seqlock: a feature has one writer, which
+makes its sequence odd, stores the values and the timestamp, and makes it even
+again; a reader copies the values and the timestamp between two reads of an
+even, unchanged sequence, and copies again otherwise, so it never gets half of
+one frame and half of the next. An unwritten feature has a NaN timestamp, so
+a reader never mistakes it for zeros. (This relies on the stores and loads
+keeping their order, as they do on x86.)
 
 See the "Store design" section of docs/feature_plans/runtime-inhousing-plan.md.
 """
@@ -14,6 +17,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -46,6 +50,8 @@ BLOCK_PREFIX = "pai-"
 _BLOCK_SESSION_CHARS = 18
 _SHM_DIR = Path("/dev/shm")  # noqa: S108  # nosec B108 - where Linux exposes POSIX shared memory, not a temp file
 _WORD = 8
+_READ_ATTEMPTS = 20
+"""Copies a reader tries before it settles for the last one: a writer that is never done is a stuck one."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +157,7 @@ class _Slot:
 def _layout(spec: FeatureSpec) -> tuple[dict[str, _Slot], dict[str, _Slot], int]:
     """Where each feature lives. Deterministic, so attaching needs only the spec."""
     stamps = len(VECTOR_KEYS) + len(spec.observations)
-    offset = stamps * _WORD
+    offset = 2 * stamps * _WORD  # a timestamp and a sequence number per feature
     vectors: dict[str, _Slot] = {}
     for index, key in enumerate(VECTOR_KEYS):
         vectors[key] = _Slot(index, offset, (len(spec.joint_names),), np.float64)
@@ -175,7 +181,9 @@ class Store:
         self.spec = spec
         self._block = block
         self._vectors, self._images, _size = _layout(spec)
-        self._stamps: np.ndarray = np.ndarray((len(self._vectors) + len(self._images),), np.float64, block.buf)
+        features = len(self._vectors) + len(self._images)
+        self._stamps: np.ndarray = np.ndarray((features,), np.float64, block.buf)
+        self._sequences: np.ndarray = np.ndarray((features,), np.uint64, block.buf, features * _WORD)
         self._views: dict[str, np.ndarray] = {
             key: np.ndarray(slot.shape, slot.dtype, block.buf, slot.offset)
             for key, slot in (*self._vectors.items(), *(("camera:" + k, s) for k, s in self._images.items()))
@@ -228,25 +236,44 @@ class Store:
 
     def invalidate_observation(self, camera: str) -> None:
         """Make a lost camera unreadable until its next frame is written."""
-        self._stamps[self._images[camera].stamp_index] = math.nan
+        index = self._images[camera].stamp_index
+        self._sequences[index] += 1
+        self._stamps[index] = math.nan
+        self._sequences[index] += 1
 
     def _write(self, slot: _Slot, view: np.ndarray, values: ArrayLike, timestamp: float) -> None:
         array = np.asarray(values)
         if array.shape != slot.shape:
             raise ValueError(f"Expected shape {slot.shape}, got {array.shape}")
+        index = slot.stamp_index
+        self._sequences[index] += 1  # odd: being written
         view[...] = array
-        self._stamps[slot.stamp_index] = timestamp  # last: marks the values as written
+        self._stamps[index] = timestamp
+        self._sequences[index] += 1  # even: written
 
     def _read(self, slot: _Slot, view: np.ndarray, names: tuple[str, ...]) -> Sample | None:
-        timestamp = float(self._stamps[slot.stamp_index])  # first: see _write
-        if math.isnan(timestamp):
+        index = slot.stamp_index
+        value, timestamp = None, math.nan
+        for _ in range(_READ_ATTEMPTS):
+            before = int(self._sequences[index])
+            if before % 2:  # mid-write: let the writer finish
+                time.sleep(0)
+                continue
+            timestamp = float(self._stamps[index])
+            if math.isnan(timestamp):
+                return None
+            value = view.copy()
+            if int(self._sequences[index]) == before:
+                return Sample(value, names, timestamp)
+        if value is None:
             return None
-        return Sample(view.copy(), names, timestamp)
+        logger.warning("Store slot {} kept changing while it was read; using the last copy", index)
+        return Sample(value, names, timestamp)
 
     def close(self) -> None:
         """Release this process's mapping."""
         self._views.clear()
-        del self._stamps
+        del self._stamps, self._sequences
         self._block.close()
 
     def unlink(self) -> None:
