@@ -4,26 +4,58 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, nullcontext
 
 import cv2
+import numpy as np
 from loguru import logger
 from physicalai.capture import SharedCamera
+from physicalai.capture.frame import Frame
 
 from runtime_session.bus import Bus, publish_status
-from runtime_session.store import ImageSpec, Store
+from runtime_session.store import ImageSpec, Store, depth_key
 from schemas.project_camera import Camera
 from schemas.runtime_session import ComponentState
 from utils.camera_factory import build_shared_camera
+from utils.realsense_rgbd import output_has_color, output_has_depth, unpack_rgbd
 from workers.base import ThreadWorker
 from workers.rate import Rate
 
+POLLS_PER_FRAME = 2
+"""How many times per frame interval a camera is polled, so a new frame reaches the store within half a frame."""
+
 
 def camera_image_spec(config: Camera) -> ImageSpec:
-    """The frame shape a camera's store slot has."""
+    """The frame shape a camera's color store slot has."""
     # TODO explicitly add width, height to ip camera
     return ImageSpec(height=config.payload.height or 480, width=config.payload.width or 640)
 
 
+def camera_observations(key: str, config: Camera) -> dict[str, ImageSpec]:
+    """The store slots a camera at ``key`` writes: its color image, its depth map, or both.
+
+    A RealSense camera's ``output_type`` picks them; its depth map is aligned to the color image,
+    so it has the same height and width, and is stored at :func:`depth_key`. Any other camera has
+    its color image only.
+    """
+    color = camera_image_spec(config)
+    if config.driver != "realsense":
+        return {key: color}
+    output_type = config.payload.output_type
+    slots: dict[str, ImageSpec] = {}
+    if output_has_color(output_type):
+        slots[key] = color
+    if output_has_depth(output_type):
+        slots[depth_key(key)] = ImageSpec.depth(color.height, color.width)
+    return slots
+
+
+def depth_range_mm(config: Camera) -> tuple[int, int] | None:
+    """The depth a RealSense camera keeps, in millimetres; ``None`` for a camera without depth."""
+    if config.driver != "realsense" or not output_has_depth(config.payload.output_type):
+        return None
+    return round(config.payload.depth_range_min * 1000), round(config.payload.depth_range_max * 1000)
+
+
 class CameraWorker(ThreadWorker[SharedCamera]):
-    """Read one camera into its store slot at the camera's fps.
+    """Read one camera into its store slots (see :func:`camera_observations`) as its frames arrive.
 
     A thread: ``SharedCamera`` already runs the capture in a publisher process.
 
@@ -60,7 +92,10 @@ class CameraWorker(ThreadWorker[SharedCamera]):
         self.store = store
         self.key = key
         self.is_locked = is_locked
-        self._image = camera_image_spec(config)
+        self._slots = camera_observations(key, config)
+        self._color_key = key if key in self._slots else None
+        self._depth_key = depth_key(key) if depth_key(key) in self._slots else None
+        self._depth_range = depth_range_mm(config)
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[SharedCamera]:
@@ -88,13 +123,17 @@ class CameraWorker(ThreadWorker[SharedCamera]):
         try:
             await self._capture(context)
         except Exception as error:
-            self.store.invalidate_observation(self.key)
+            self._invalidate()
             self._publish("failed", str(error))
             raise
 
+    def _invalidate(self) -> None:
+        for key in self._slots:
+            self.store.invalidate_observation(key)
+
     async def _capture(self, context: SharedCamera) -> None:
-        rate = Rate(self.config.payload.fps, name=self.name)
-        size = (self._image.width, self._image.height)
+        # Polled faster than frames arrive, so each new frame reaches the store within half a frame.
+        rate = Rate(self.config.payload.fps * POLLS_PER_FRAME, name=self.name)
         camera: SharedCamera | None = context
         previous = None
         reconnecting = False
@@ -103,8 +142,7 @@ class CameraWorker(ThreadWorker[SharedCamera]):
             frame = camera.read_latest()
             if frame is not previous:
                 previous, last_new_frame = frame, time.monotonic()
-                data = frame.data if frame.data.shape[:2] == self._image.shape[:2] else cv2.resize(frame.data, size)
-                self.store.write_observation(self.key, data, timestamp=frame.timestamp)
+                self._write(frame)
                 if reconnecting:
                     self._publish("running")
                     reconnecting = False
@@ -115,6 +153,37 @@ class CameraWorker(ThreadWorker[SharedCamera]):
                 continue
             await rate.sleep()
 
+    def _write(self, frame: Frame) -> None:
+        """Write a frame's color image and depth map to their slots, with the frame's timestamp.
+
+        Color is written before depth, both with the frameset's timestamp, so a reader that finds
+        the same timestamp on both has a matching pair.
+
+        Raises:
+            RuntimeError: The camera does not deliver the streams its configuration asks for.
+        """
+        if self._depth_key is None:
+            color, depth = frame.data, None
+        else:
+            color, depth = unpack_rgbd(np.asarray(frame.data))
+            if depth is None or (self._color_key is not None and color is None):
+                wanted = "color and depth" if self._color_key is not None else "depth"
+                raise RuntimeError(
+                    f"Camera {self.config.name!r} delivers {frame.data.shape[-1]}-channel frames without the "
+                    f"{wanted} streams it is configured for; it may still be running with older settings. "
+                    "Reload the environment."
+                )
+        if self._color_key is not None and color is not None:
+            self.store.write_observation(
+                self._color_key, _fit(color, self._slots[self._color_key]), timestamp=frame.timestamp
+            )
+        if self._depth_key is not None and depth is not None:
+            depth = _fit(depth, self._slots[self._depth_key])
+            if self._depth_range is not None:
+                nearest, farthest = self._depth_range
+                depth = np.where((depth < nearest) | (depth > farthest), np.uint16(0), depth)
+            self.store.write_observation(self._depth_key, depth, timestamp=frame.timestamp)
+
     async def _reconnect(self, lost: SharedCamera) -> SharedCamera | None:
         """Release a camera that stopped sending frames and reopen it until it is back.
 
@@ -122,7 +191,7 @@ class CameraWorker(ThreadWorker[SharedCamera]):
             The reopened camera, or ``None`` if the worker was asked to stop first.
         """
         logger.warning("Camera {!r} sent no frame for {:.1f}s; reconnecting", self.config.name, self.stale_after_s)
-        self.store.invalidate_observation(self.key)
+        self._invalidate()
         self._publish("starting", f"no frames for {self.stale_after_s:.1f}s; reconnecting")
         self._camera = None
         try:
@@ -148,3 +217,17 @@ class CameraWorker(ThreadWorker[SharedCamera]):
     def _publish(self, state: ComponentState, error: str | None = None) -> None:
         if self._bus is not None and self.component is not None:
             publish_status(self._bus, self.component, state, error)
+
+
+def _fit(image: np.ndarray, slot: ImageSpec) -> np.ndarray:
+    """``image`` at the slot's resolution: resized if the publisher runs at another one.
+
+    Depth is resized with nearest-neighbour, so no depth is invented between surfaces.
+    """
+    if image.shape[:2] == slot.shape[:2]:
+        return image
+    size = (slot.width, slot.height)
+    image = np.ascontiguousarray(image)  # a color view into an RGB-D frame is strided
+    if not slot.is_depth:
+        return cv2.resize(image, size)
+    return cv2.resize(image.reshape(image.shape[:2]), size, interpolation=cv2.INTER_NEAREST).reshape(slot.shape)

@@ -10,6 +10,7 @@ and the store is sampled at ``hz`` into one binary observation per tick. See
 """
 
 import asyncio
+from collections.abc import Collection
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -34,7 +35,7 @@ from runtime_session import session as runtime_session
 from runtime_session.bus import STATUSES, Bus, BusRequestError, NoResponderError, Subscription, command_key
 from runtime_session.resolve import project_resolvers
 from runtime_session.session import RuntimeSession
-from runtime_session.store import ACTION, STATE, Sample
+from runtime_session.store import ACTION, DEPTH_SUFFIX, STATE, Sample
 from schemas.runtime_session import (
     AckMessage,
     ObservationFrame,
@@ -179,7 +180,7 @@ def _named(sample: Sample | None) -> dict[str, float] | None:
 
 async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float) -> None:
     """Send the store at ``hz``: one observation per tick with the joints and every new camera frame."""
-    from utils.jpeg import encode_jpeg_rgb
+    from utils.jpeg import encode_jpeg_frame
 
     rate = Rate(hz, name=f"session-sampler-{session.id}")
     sent: dict[str, float] = {}
@@ -192,12 +193,12 @@ async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float
             joints_at = max((sample.timestamp for sample in (state, action) if sample is not None), default=None)
             frames = {
                 key: frame
-                for key in store.spec.observations
+                for key in _shown_frames(store.spec.observations)
                 if (frame := store.read_observation(key)) is not None and frame.timestamp != sent.get(key)
             }
             if frames or (joints_at is not None and joints_at != sent.get(STATE)):
                 jpegs = await asyncio.gather(
-                    *(asyncio.to_thread(encode_jpeg_rgb, frame.value) for frame in frames.values())
+                    *(asyncio.to_thread(encode_jpeg_frame, frame.value) for frame in frames.values())
                 )
                 header = ObservationMessage(
                     timestamp=max([joints_at or 0.0, *(frame.timestamp for frame in frames.values())]),
@@ -213,6 +214,15 @@ async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float
                     sent[STATE] = joints_at
                 sent.update((key, frame.timestamp) for key, frame in frames.items())
         await rate.sleep()
+
+
+def _shown_frames(observations: Collection[str]) -> list[str]:
+    """The frames a session shows: every camera's, but not the depth map of a camera that has color too."""
+    return [
+        key
+        for key in observations
+        if not (key.endswith(DEPTH_SUFFIX) and key.removesuffix(DEPTH_SUFFIX) in observations)
+    ]
 
 
 def observation_message(header: ObservationMessage, jpegs: list[bytes]) -> bytes:

@@ -196,7 +196,11 @@ class SessionCamera(BaseModel):
     camera_id: UUID
     name: str
     key: str
-    """The store and frame key; also the key a dataset records this camera under."""
+    """The store and frame key shown for this camera; also the key a dataset records it under.
+
+    The color image, or the depth map (``<camera>_depth``) of a depth-only camera."""
+    depth_key: str | None = None
+    """The store and frame key of the camera's depth map, aligned to its color image, if it records depth."""
     height: int
     width: int
 

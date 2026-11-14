@@ -245,3 +245,103 @@ class TestCameraReconnect:
 
         old.disconnect.assert_called_once()
         new.disconnect.assert_called_once()
+
+
+def _realsense_config(output_type="both", width=8, height=6, depth_range=(0.3, 3.0)):
+    from schemas.project_camera import CameraAdapter
+
+    # The schema's minimum resolution is irrelevant to the worker; bypass it to keep frames tiny.
+    camera = CameraAdapter.validate_python(
+        {
+            "driver": "realsense",
+            "name": "top",
+            "fingerprint": {"serial": "123"},
+            "hardware_name": None,
+            "payload": {
+                "width": 1280,
+                "height": 720,
+                "fps": 30,
+                "output_type": output_type,
+                "depth_range_min": depth_range[0],
+                "depth_range_max": depth_range[1],
+            },
+        }
+    )
+    camera.payload.width, camera.payload.height = width, height
+    return camera
+
+
+def _rgbd_frame(color, depth, timestamp=4.0):
+    from utils.realsense_rgbd import pack_rgbd
+
+    frame = MagicMock()
+    frame.data = pack_rgbd(color, depth)
+    frame.timestamp = timestamp
+    return frame
+
+
+def _run_once(worker, frame):
+    camera = MagicMock()
+
+    def read_latest():
+        worker.request_stop()
+        return frame
+
+    camera.read_latest.side_effect = read_latest
+    asyncio.run(worker.run_loop(camera))
+
+
+class TestRealSenseCameraWorker:
+    @pytest.fixture
+    def rgbd_store(self):
+        from workers.camera_worker import camera_observations
+
+        store = Store.create(FeatureSpec((), camera_observations("top", _realsense_config())), uuid.uuid4().hex)
+        yield store
+        store.unlink()
+
+    def test_both_writes_color_and_aligned_depth_with_one_timestamp(self, rgbd_store):
+        color = np.full((6, 8, 3), 5, np.uint8)
+        depth = np.full((6, 8), 1500, np.uint16)
+        depth[0, 0], depth[0, 1], depth[0, 2] = 0, 200, 3500  # no data, nearer and farther than the range
+        _run_once(CameraWorker(_realsense_config(), rgbd_store, "top"), _rgbd_frame(color, depth))
+
+        color_sample, depth_sample = rgbd_store.read_observation("top"), rgbd_store.read_observation("top_depth")
+        assert color_sample.timestamp == depth_sample.timestamp == 4.0
+        np.testing.assert_array_equal(color_sample.value, color)
+        assert depth_sample.value.dtype == np.uint16
+        assert depth_sample.value.shape == (6, 8, 1)
+        assert depth_sample.value[0, :3, 0].tolist() == [0, 0, 0]  # outside 0.3-3 m is no data
+        assert np.all(depth_sample.value[1:] == 1500)
+
+    def test_depth_at_another_resolution_is_resized_without_inventing_depth(self, rgbd_store):
+        depth = np.zeros((3, 4), np.uint16)
+        depth[:, 2:] = 1000
+        _run_once(
+            CameraWorker(_realsense_config(), rgbd_store, "top"), _rgbd_frame(np.zeros((3, 4, 3), np.uint8), depth)
+        )
+
+        values = set(np.unique(rgbd_store.read_observation("top_depth").value).tolist())
+        assert values == {0, 1000}
+
+    def test_depth_only(self):
+        from workers.camera_worker import camera_observations
+
+        config = _realsense_config("depth")
+        store = Store.create(FeatureSpec((), camera_observations("top", config)), uuid.uuid4().hex)
+        try:
+            _run_once(CameraWorker(config, store, "top"), _rgbd_frame(None, np.full((6, 8), 900, np.uint16)))
+            assert set(store.spec.observations) == {"top_depth"}
+            assert np.all(store.read_observation("top_depth").value == 900)
+        finally:
+            store.unlink()
+
+    def test_a_publisher_without_the_configured_streams_fails_clearly(self, rgbd_store):
+        frame = MagicMock()
+        frame.data, frame.timestamp = np.zeros((6, 8, 3), np.uint8), 1.0  # color only, from an older publisher
+        camera = MagicMock()
+        camera.read_latest.return_value = frame
+        with pytest.raises(RuntimeError, match="without the color and depth streams"):
+            asyncio.run(CameraWorker(_realsense_config(), rgbd_store, "top").run_loop(camera))
+        assert rgbd_store.read_observation("top") is None
+        assert rgbd_store.read_observation("top_depth") is None

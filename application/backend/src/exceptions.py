@@ -248,13 +248,16 @@ class CameraSettingsConflictError(BaseException):
         project_name: str,
         pinned: tuple[int, int, int],
         requested: tuple[int, int, int],
+        pinned_output: str = "color",
+        requested_output: str = "color",
     ) -> None:
         width, height, fps = pinned
         req_width, req_height, req_fps = requested
+        outputs = (f" {pinned_output}", f" {requested_output}") if pinned_output != requested_output else ("", "")
         super().__init__(
             message=(
-                f"Camera is already in use by project {project_name!r} at {width}x{height}@{fps}. "
-                f"This session requested {req_width}x{req_height}@{req_fps}."
+                f"Camera is already in use by project {project_name!r} at {width}x{height}@{fps}{outputs[0]}. "
+                f"This session requested {req_width}x{req_height}@{req_fps}{outputs[1]}."
             ),
             error_code="camera_settings_conflict",
             http_status=http.HTTPStatus.LOCKED,

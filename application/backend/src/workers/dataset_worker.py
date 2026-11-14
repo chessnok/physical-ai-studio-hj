@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from exceptions import RuntimeSessionCommandError
 from runtime_session.bus import Bus, command_key, status_key
-from runtime_session.store import ACTION, STATE, FeatureSpec, Store
+from runtime_session.store import ACTION, STATE, FeatureSpec, Sample, Store, depth_key
 from schemas.runtime_session import DiscardEpisodeCommand, SaveEpisodeCommand, StartEpisodeCommand, StatusMessage
 from workers.base import ProcessWorker
 from workers.rate import Rate
@@ -41,6 +41,8 @@ STATUS = "rpc/dataset/status"
 EVENTS = "evt/dataset"
 MIN_EPISODE_FRAMES = 2
 """lerobot's streaming encoder gives a 1-frame episode no video stats; it saves, then closing the dataset fails."""
+PAIR_READS = 3
+"""How often a color image and its depth map are read again when a camera wrote between the two reads."""
 
 
 class Empty(BaseModel):
@@ -118,8 +120,28 @@ class Recorder:
     def camera_status(self, status: StatusMessage) -> None:
         """Discard on camera loss even if the feed recovers between recording ticks."""
         key = status.component.removeprefix("environment/")
-        if key in self.store.spec.observations and status.state in {"starting", "failed"}:
+        recorded = key in self.store.spec.observations or depth_key(key) in self.store.spec.observations
+        if recorded and status.state in {"starting", "failed"}:
             self._camera_lost(key)
+
+    def _read_frames(self) -> dict[str, Sample | None]:
+        """Every camera's latest frame; a color image and its depth map from the same frameset.
+
+        A camera writes its color image and then its depth map, both with the frameset's
+        timestamp. A pair read while it was writing has two timestamps, and is read again.
+        """
+        observations = self.store.spec.observations
+        frames = {key: self.store.read_observation(key) for key in observations}
+        for color in observations:
+            depth = depth_key(color)
+            if depth not in observations:
+                continue
+            for _ in range(PAIR_READS):
+                pair = frames[color], frames[depth]
+                if pair[0] is None or pair[1] is None or pair[0].timestamp == pair[1].timestamp:
+                    break
+                frames[color], frames[depth] = self.store.read_observation(color), self.store.read_observation(depth)
+        return frames
 
     def _camera_lost(self, key: str) -> None:
         if self._open:
@@ -135,7 +157,7 @@ class Recorder:
         if not self._open or self.task is None:
             return
         state, action = self.store.read(STATE), self.store.read(ACTION)
-        frames = {key: self.store.read_observation(key) for key in self.store.spec.observations}
+        frames = self._read_frames()
         for key, frame in frames.items():
             if frame is None:
                 self._camera_lost(key)

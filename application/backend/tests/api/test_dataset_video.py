@@ -107,3 +107,43 @@ def test_video_returns_not_found_for_missing_files_and_directories(dataset: Data
     response = TestClient(app).get(f"/api/dataset/{dataset.id}/video/{video_path}")
 
     assert response.status_code == 404
+
+
+DEPTH_VIDEO_PATH = "videos/observation.images.top_depth/chunk-000/file-000.mp4"
+
+
+def _write_info(dataset: Dataset) -> None:
+    import json
+
+    meta = Path(dataset.path) / "meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    features = {
+        "observation.images.gripper": {"dtype": "video", "shape": [4, 4, 3], "info": {"is_depth_map": False}},
+        "observation.images.top_depth": {"dtype": "video", "shape": [4, 4, 1], "info": {"is_depth_map": True}},
+    }
+    (meta / "info.json").write_text(json.dumps({"features": features}))
+
+
+def test_a_depth_video_is_previewed_as_a_browser_playable_copy(dataset: Dataset, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    _write_info(dataset)
+    depth_video = Path(dataset.path) / DEPTH_VIDEO_PATH
+    depth_video.parent.mkdir(parents=True)
+    depth_video.write_bytes(b"depth")
+    preview = tmp_path / "preview.mp4"
+    preview.write_bytes(b"colorized")
+    with patch("internal_datasets.lerobot.depth_video.ensure_depth_preview", return_value=preview) as ensure:
+        response = TestClient(app).get(f"/api/dataset/{dataset.id}/video/{DEPTH_VIDEO_PATH}?depth_preview=true")
+        raw = TestClient(app).get(f"/api/dataset/{dataset.id}/video/{DEPTH_VIDEO_PATH}")
+        color = TestClient(app).get(f"{_video_url(dataset)}?depth_preview=true")
+
+    assert response.status_code == 200
+    assert response.content == b"colorized"
+    assert response.headers["content-type"] == "video/mp4"
+    assert ensure.call_count == 1
+    assert ensure.call_args.args[0] == depth_video.resolve()
+    assert ensure.call_args.args[2] == {"is_depth_map": True}
+    assert raw.content == b"depth"  # without the flag, the recorded file itself
+    assert color.status_code == 200  # a color video has nothing to preview: the file itself
+    assert len(color.content) == 4096

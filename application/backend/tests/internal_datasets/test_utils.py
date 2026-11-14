@@ -83,6 +83,7 @@ def test_get_internal_recording_dataset_uses_recording_mode() -> None:
 def test_get_internal_recording_dataset_uses_configured_video_recording_settings() -> None:
     settings = MagicMock()
     settings.video_recording.preset = "cpu-h264"
+    settings.depth_video_crf = 8
     with (
         patch("internal_datasets.utils.get_settings", return_value=settings),
         patch("internal_datasets.utils.resolve_video_encoding_settings") as resolve_preset,
@@ -90,5 +91,5 @@ def test_get_internal_recording_dataset_uses_configured_video_recording_settings
     ):
         get_internal_recording_dataset(_make_dataset())
 
-    resolve_preset.assert_called_once_with("cpu-h264")
+    resolve_preset.assert_called_once_with("cpu-h264", depth_crf=8)
     assert mocked_cls.call_args.kwargs["recording_video_encoding_settings"] is resolve_preset.return_value

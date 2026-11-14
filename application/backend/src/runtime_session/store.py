@@ -32,6 +32,15 @@ ACTION = "action"
 VECTOR_KEYS = (STATE, ACTION)
 """Joint vectors the store always holds; they share the spec's joint names."""
 
+DEPTH_SUFFIX = "_depth"
+"""Appended to a camera's key for the slot, and dataset camera, of its depth map."""
+
+
+def depth_key(key: str) -> str:
+    """The store key, and dataset camera name, of the depth map of the camera at ``key``."""
+    return f"{key}{DEPTH_SUFFIX}"
+
+
 BLOCK_PREFIX = "pai-"
 # macOS limits names to 31 bytes including Python's leading "/": this leaves room for a 7-digit pid.
 _BLOCK_SESSION_CHARS = 18
@@ -41,16 +50,29 @@ _WORD = 8
 
 @dataclass(frozen=True, slots=True)
 class ImageSpec:
+    """One camera image: ``uint8`` color, or a ``uint16`` depth map in millimetres with one channel."""
+
     height: int
     width: int
     channels: int = 3
+    dtype: str = "uint8"
+
+    @classmethod
+    def depth(cls, height: int, width: int) -> ImageSpec:
+        """A depth map: one ``uint16`` channel of millimetres, 0 where there is no depth."""
+        return cls(height, width, 1, "uint16")
 
     @property
     def shape(self) -> tuple[int, int, int]:
         return (self.height, self.width, self.channels)
 
+    @property
+    def is_depth(self) -> bool:
+        return self.dtype == "uint16"
+
     def __str__(self) -> str:
-        return f"{self.height}x{self.width}x{self.channels}"
+        shape = f"{self.height}x{self.width}x{self.channels}"
+        return shape if self.dtype == "uint8" else f"{shape} {self.dtype}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +158,8 @@ def _layout(spec: FeatureSpec) -> tuple[dict[str, _Slot], dict[str, _Slot], int]
         offset += vectors[key].nbytes
     images: dict[str, _Slot] = {}
     for index, key in enumerate(sorted(spec.observations), start=len(VECTOR_KEYS)):
-        images[key] = _Slot(index, offset, spec.observations[key].shape, np.uint8)
+        image = spec.observations[key]
+        images[key] = _Slot(index, offset, image.shape, np.dtype(image.dtype).type)
         offset += -(-images[key].nbytes // _WORD) * _WORD  # keep the next slot 8-byte aligned
     return vectors, images, max(offset, _WORD)
 

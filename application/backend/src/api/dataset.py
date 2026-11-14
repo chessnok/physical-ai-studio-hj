@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Annotated
@@ -25,6 +26,7 @@ from internal_datasets.utils import get_internal_read_dataset
 from runtime_session.dataset import editing, is_being_edited
 from schemas import Dataset, Episode, EpisodeInfo
 from services import DatasetDownloadService, DatasetService, EpisodeThumbnailService
+from settings import get_settings
 
 router = APIRouter(prefix="/api/dataset", tags=["Dataset"])
 
@@ -162,6 +164,15 @@ async def dataset_video_endpoint(
     dataset_id: UUID,
     video_path: str,
     dataset_service: Annotated[DatasetService, Depends(get_dataset_service)],
+    depth_preview: Annotated[
+        bool,
+        Query(
+            description=(
+                "For a depth video: a colorized, browser-playable copy with the same timestamps "
+                "(made on first request, then cached)"
+            )
+        ),
+    ] = False,
 ) -> FileResponse:
     """Get path to video of episode"""
     dataset = await dataset_service.get_dataset_by_id(dataset_id)
@@ -180,10 +191,31 @@ async def dataset_video_endpoint(
     if not Path(requested_path).is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
 
+    if depth_preview and (info := _depth_video_info(dataset, normalized_video_path)) is not None:
+        from internal_datasets.lerobot.depth_video import ensure_depth_preview
+
+        preview = await asyncio.to_thread(ensure_depth_preview, Path(requested_path), get_settings().cache_dir, info)
+        return FileResponse(preview, media_type="video/mp4", headers={"Cache-Control": "no-cache"})
+
     # Recording appends episodes to the same mp4, so a cached copy goes stale: it ends where the
     # file ended when it was fetched, and every later episode then fails to play. Make browsers
     # check the ETag before reusing it.
     return FileResponse(requested_path, headers={"Cache-Control": "no-cache"})
+
+
+def _depth_video_info(dataset: Dataset, video_path: Path) -> dict | None:
+    """The ``info`` of the depth feature whose video ``video_path`` is, or ``None`` for any other file.
+
+    LeRobot keeps a feature's videos under ``videos/<feature key>/``.
+    """
+    if len(video_path.parts) < 2 or video_path.parts[0] != "videos":
+        return None
+    info_path = Path(dataset.path) / "meta" / "info.json"
+    if not info_path.is_file():
+        return None
+    feature = json.loads(info_path.read_text()).get("features", {}).get(video_path.parts[1], {})
+    info = feature.get("info") or {}
+    return info if info.get("is_depth_map") or info.get("video.is_depth_map") else None
 
 
 @router.get("/{dataset_id}/download")

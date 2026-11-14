@@ -298,6 +298,9 @@ class Settings(BaseSettings):
     hotkeys: HotkeySettings = HotkeySettings()
     # User-configurable video encoding for dataset recordings.
     video_recording: VideoRecordingSettings = VideoRecordingSettings()
+    # Depth maps are recorded losslessly (about 0.5-1 GB per minute per 1280x720 camera at 30 fps).
+    # A CRF (e.g. 8) records them lossy instead: around 50x smaller, with errors near depth edges.
+    depth_video_crf: int | None = Field(default=None, ge=0, le=51, alias="DEPTH_VIDEO_CRF")
 
     # Managed SSH trainers require a loopback-bound backend; see
     # `core.security.ssh_network_exposure`. The UI warns that SSH access has

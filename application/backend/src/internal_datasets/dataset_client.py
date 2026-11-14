@@ -49,6 +49,14 @@ class DatasetClient(ABC):
     def get_video_keys(self) -> list[str]:
         """Get the video keys used to record the dataset"""
 
+    def get_depth_keys(self) -> list[str]:
+        """The video keys that hold depth maps rather than color images."""
+        return []
+
+    def get_feature_info(self, key: str) -> dict:  # noqa: ARG002
+        """The ``info`` LeRobot recorded for a feature, such as a depth video's quantization."""
+        return {}
+
     @abstractmethod
     def get_episode_thumbnail_png(
         self,

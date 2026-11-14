@@ -12,6 +12,8 @@ class EpisodeVideo(BaseModel):
     start: float
     end: float
     path: str
+    is_depth: bool = False
+    """A depth map (12-bit HEVC, which browsers cannot play): fetch it with ``depth_preview=true`` to view it."""
 
 
 class EpisodeInfo(BaseModel):

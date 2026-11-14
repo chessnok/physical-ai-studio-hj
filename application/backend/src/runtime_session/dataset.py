@@ -2,8 +2,10 @@
 
 A dataset stores the follower's joints packed into ``observation.state`` and
 ``action`` with ``<joint>.pos`` names, and each camera as
-``observation.images.<key>``. The store uses the same names and keys, so a
-dataset's spec compares to a session's directly. A dataset with nothing
+``observation.images.<key>``; a RealSense camera's depth map, aligned to its
+color image, as ``observation.images.<key>_depth``, a LeRobot depth feature
+(``uint16`` millimetres, ``info.is_depth_map``). The store uses the same names
+and keys, so a dataset's spec compares to a session's directly. A dataset with nothing
 recorded yet has no shape of its own and takes the session's.
 
 A :class:`Recording` then records into it, from the session's store, through a
@@ -108,11 +110,19 @@ def dataset_spec(dataset: Dataset) -> FeatureSpec | None:
     if tuple(features["action"]["names"]) != joints:
         raise ValueError(f"Dataset {dataset.name!r} records an action for other joints than its state")
     cameras = {
-        key.removeprefix(_IMAGE_PREFIX): ImageSpec(*(int(dim) for dim in value["shape"]))
+        key.removeprefix(_IMAGE_PREFIX): _image_spec(value)
         for key, value in features.items()
         if key.startswith(_IMAGE_PREFIX)
     }
     return FeatureSpec(joints, cameras)
+
+
+def _image_spec(feature: dict[str, Any]) -> ImageSpec:
+    """A recorded camera feature's store slot: a depth map is ``uint16`` millimetres, color ``uint8``."""
+    height, width, channels = (int(dim) for dim in feature["shape"])
+    info = feature.get("info") or {}
+    is_depth = info.get("is_depth_map") or info.get("video.is_depth_map")
+    return ImageSpec(height, width, channels, "uint16" if is_depth else "uint8")
 
 
 def lerobot_features(spec: FeatureSpec) -> dict[str, Any]:

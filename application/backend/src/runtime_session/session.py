@@ -68,7 +68,7 @@ from schemas.runtime_session import (
     UnloadEnvironmentCommand,
     UnloadModelCommand,
 )
-from services.camera_claims import CameraClaim, settings_from_camera
+from services.camera_claims import CameraClaim, output_from_camera, settings_from_camera
 from workers import dataset_worker as dataset_rpc
 from workers.base import WorkerStartupError
 from workers.dataset_worker import RecordingStatus
@@ -429,6 +429,7 @@ class RuntimeSession:
                 CameraClaim(
                     fingerprint=camera.fingerprint,
                     settings=settings_from_camera(camera),
+                    output=output_from_camera(camera),
                     holder=self.id,
                     project_id=self.project_id,
                     project_name=self.project_name,

@@ -170,3 +170,28 @@ def test_sweep_removes_only_blocks_whose_creator_is_gone(store: Store) -> None:
     assert store.name not in removed
     assert store.name.startswith(f"{BLOCK_PREFIX}{os.getpid()}-")
     Store.attach(SPEC, store.name).close()
+
+
+def test_a_depth_slot_holds_uint16_millimetres() -> None:
+    spec = FeatureSpec(JOINTS, {"top": ImageSpec(2, 3), "top_depth": ImageSpec.depth(2, 3)})
+    store = Store.create(spec, f"test-{uuid.uuid4().hex}")
+    try:
+        depth = np.arange(6, dtype=np.uint16).reshape(2, 3, 1) * 1000 + 65000 // 6
+        store.write_observation("top_depth", depth, timestamp=3.0)
+        store.write_observation("top", np.full((2, 3, 3), 9, np.uint8), timestamp=3.0)
+
+        sample = store.read_observation("top_depth")
+        assert sample is not None
+        assert sample.value.dtype == np.uint16
+        np.testing.assert_array_equal(sample.value, depth)
+        assert np.all(store.read_observation("top").value == 9)
+    finally:
+        store.unlink()
+
+
+def test_depth_image_spec_differs_from_a_one_channel_color_one() -> None:
+    assert ImageSpec.depth(2, 3) == ImageSpec(2, 3, 1, "uint16")
+    assert ImageSpec.depth(2, 3) != ImageSpec(2, 3, 1)
+    assert ImageSpec.depth(2, 3).is_depth
+    assert str(ImageSpec.depth(2, 3)) == "2x3x1 uint16"
+    assert str(ImageSpec(2, 3)) == "2x3x3"

@@ -6,9 +6,10 @@ import os
 import signal
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import numpy as np
 import pytest
 
 from exceptions import IncompatiblePartsError, RuntimeSessionCommandError
@@ -19,6 +20,7 @@ from runtime_session.dataset import DEFAULT_RECORDING_FPS, dataset_fps, dataset_
 from runtime_session.session import RuntimeSession
 from runtime_session.store import FeatureSpecMismatchError, ImageSpec
 from schemas.dataset import Dataset
+from schemas.project_camera import CameraAdapter
 from schemas.runtime_session import DiscardEpisodeCommand, SaveEpisodeCommand, StartEpisodeCommand
 from tests.workers.fake_dataset import FakeDatasetWorker, recording_log
 from workers.dataset_worker import RecordingStatus
@@ -483,3 +485,100 @@ async def test_a_saved_episode_reaches_the_dataset_when_the_recording_finishes(n
 
     await session.unload_dataset()
     assert get_internal_read_dataset(dataset).find_episode(0) is not None
+
+
+def _realsense_environment(output_type: str = "both"):
+    environment = make_environment(cameras=0)
+    environment.cameras.append(
+        CameraAdapter.validate_python(
+            {
+                "id": str(uuid4()),
+                "driver": "realsense",
+                "name": "Top",
+                "fingerprint": {"serial": "243622062352"},
+                "hardware_name": "Intel RealSense D415",
+                "payload": {"width": 424, "height": 240, "fps": 30, "output_type": output_type},
+            }
+        )
+    )
+    return environment
+
+
+def _expected_depth() -> np.ndarray:
+    """Millimetres across the 0.3-3 m range of the camera, with holes (0) where the sensor saw nothing."""
+    depth = np.tile(np.linspace(300, 2900, 424, dtype=np.float32), (240, 1)).astype(np.uint16)
+    depth[100:140, 50:90] = 0
+    return depth
+
+
+@pytest.fixture
+def fake_rgbd_cameras():
+    """RealSense publishers that always have a fresh frameset of known color and depth."""
+    from utils.realsense_rgbd import pack_rgbd
+
+    color = np.zeros((240, 424, 3), dtype=np.uint8)
+    color[..., 0] = np.arange(424, dtype=np.uint16)[None, :] % 256
+    packed = pack_rgbd(color, _expected_depth())
+
+    def frame() -> MagicMock:
+        latest = MagicMock()
+        latest.data = packed
+        latest.timestamp = time.monotonic()
+        return latest
+
+    with patch("workers.camera_worker.build_shared_camera") as build:
+        build.return_value.read_latest.side_effect = frame
+        yield build
+
+
+async def test_a_real_rgbd_recording_lands_in_the_dataset_with_depth_aligned_to_color(
+    new_session, fake_rgbd_cameras
+) -> None:
+    """Through lerobot: color and depth of a RealSense camera are separate features LeRobot reads back."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    dataset = _dataset()
+    session = await new_session()
+    await session.load_environment(_realsense_environment())
+    await session.load_dataset(dataset)
+    await _start(session, "pick the block")
+    await asyncio.sleep(0.4)
+    await _save(session)
+    await session.unload_dataset()
+
+    info = json.loads((Path(dataset.path) / "meta" / "info.json").read_text())
+    color_feature = info["features"]["observation.images.top"]
+    depth_feature = info["features"]["observation.images.top_depth"]
+    assert color_feature["shape"] == [240, 424, 3]
+    assert not color_feature["info"]["is_depth_map"]
+    assert depth_feature["shape"] == [240, 424, 1]
+    assert depth_feature["info"]["is_depth_map"]
+    assert depth_feature["info"]["depth_unit"] == "mm"
+    assert depth_feature["info"]["video.pix_fmt"] == "gray12le"
+    assert (depth_feature["info"]["video.depth_min"], depth_feature["info"]["video.depth_max"]) == (0.0, 10.0)
+    assert dataset_spec(dataset).observations == {
+        "top": ImageSpec(240, 424, 3),
+        "top_depth": ImageSpec.depth(240, 424),
+    }
+
+    lerobot = LeRobotDataset(str(uuid4()), root=dataset.path)
+    item = lerobot[len(lerobot) // 2]
+    depth = item["observation.images.top_depth"].numpy()[0]
+    expected = _expected_depth().astype(np.float32)
+    assert depth.shape == (240, 424)
+    holes = expected == 0
+    assert np.all(depth[holes] == 0)  # no data stays no data
+    # Lossless 12-bit log quantization over 0-10 m: within one code, 1.4 mm at 3 m.
+    assert np.abs(depth[~holes] - expected[~holes]).max() <= 1.5
+    assert item["observation.images.top"].shape == (3, 240, 424)
+
+    # Appending keeps the quantization the dataset was recorded with.
+    await session.load_dataset(dataset)
+    await _start(session, "pick the block")
+    await asyncio.sleep(0.4)
+    await _save(session)
+    await session.unload_dataset()
+    lerobot = LeRobotDataset(str(uuid4()), root=dataset.path)
+    assert lerobot.meta.total_episodes == 2
+    last = lerobot[len(lerobot) - 1]["observation.images.top_depth"].numpy()[0]
+    assert np.abs(last[~holes] - expected[~holes]).max() <= 1.5

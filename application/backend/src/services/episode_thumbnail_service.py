@@ -47,7 +47,9 @@ class EpisodeThumbnailService:
             return None
 
         if camera is None:
-            return video_keys[0]
+            # A color camera when there is one: a depth map makes a poor thumbnail.
+            depth_keys = set(dataset.get_depth_keys())
+            return next((key for key in video_keys if key not in depth_keys), video_keys[0])
 
         if camera in video_keys:
             return camera

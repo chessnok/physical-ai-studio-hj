@@ -29,10 +29,10 @@ from loguru import logger
 from exceptions import RuntimeSessionCommandError
 from robots.features import sanitize_camera_name
 from runtime_session.bus import Bus, Subscription, publish_status, status_key
-from runtime_session.store import FeatureSpec, Store
+from runtime_session.store import FeatureSpec, ImageSpec, Store, depth_key
 from schemas.runtime_session import CommandDone, ReloadEnvironment, SessionCamera, SessionEnvironment, StatusMessage
 from workers.base import WorkerStartupError
-from workers.camera_worker import CameraWorker, camera_image_spec
+from workers.camera_worker import CameraWorker, camera_observations
 from workers.robot_worker import DEFAULT_ROBOT_HZ, RobotRecipe, RobotWorker, claim_robot
 
 if TYPE_CHECKING:
@@ -71,16 +71,19 @@ class EnvironmentDescription:
             robot_id=self.follower.robot_id,
             leader_id=self.leader.robot_id if self.leader is not None else None,
             joint_names=list(self.spec.joint_names),
-            cameras=[
-                SessionCamera(
-                    camera_id=camera.id,
-                    name=camera.name,
-                    key=key,
-                    height=self.spec.observations[key].height,
-                    width=self.spec.observations[key].width,
-                )
-                for key, camera in self.cameras.items()
-            ],
+            cameras=[self._session_camera(key, camera) for key, camera in self.cameras.items()],
+        )
+
+    def shown_key(self, key: str) -> str:
+        """The frame a session shows for the camera at ``key``: its color image, or its depth map if it has no color."""
+        return key if key in self.spec.observations or depth_key(key) not in self.spec.observations else depth_key(key)
+
+    def _session_camera(self, key: str, camera: Camera) -> SessionCamera:
+        depth = depth_key(key) if depth_key(key) in self.spec.observations else None
+        shown = self.shown_key(key)
+        image = self.spec.observations[shown]
+        return SessionCamera(
+            camera_id=camera.id, name=camera.name, key=shown, depth_key=depth, height=image.height, width=image.width
         )
 
 
@@ -109,12 +112,19 @@ async def describe_environment(
         robot_names[leader_robot.id] = leader_robot.name
 
     cameras: dict[str, Camera] = {}
+    observations: dict[str, ImageSpec] = {}
+    recorded_by: dict[str, Camera] = {}
     for camera in environment.cameras:
         key = sanitize_camera_name(camera.name)
         if key in cameras:
             raise ValueError(f"Cameras {cameras[key].name!r} and {camera.name!r} would both be recorded as {key!r}")
         cameras[key] = camera
-    spec = FeatureSpec(follower.joint_names, {key: camera_image_spec(camera) for key, camera in cameras.items()})
+        for slot, image in camera_observations(key, camera).items():
+            if (other := recorded_by.get(slot)) is not None:
+                raise ValueError(f"Cameras {other.name!r} and {camera.name!r} would both be recorded as {slot!r}")
+            recorded_by[slot] = camera
+            observations[slot] = image
+    spec = FeatureSpec(follower.joint_names, observations)
     return EnvironmentDescription(
         environment_id=None if environment.id == UNSAVED_ENVIRONMENT_ID else environment.id,
         name=environment.name,
@@ -221,8 +231,10 @@ class Environment:
                 )
                 managers: dict[str, AbstractAsyncContextManager[Any]] = {"follower": follower}
                 for key, row in description.cameras.items():
-                    managers[key] = CameraWorker(
-                        row, store, key, session_id=self.session_id, component=f"{COMPONENT}/{key}"
+                    # Named after the frame the session shows for it, as its status is looked up.
+                    shown = description.shown_key(key)
+                    managers[shown] = CameraWorker(
+                        row, store, key, session_id=self.session_id, component=f"{COMPONENT}/{shown}"
                     )
                 if description.leader is not None:
                     managers["leader"] = _connected_driver(description.leader)

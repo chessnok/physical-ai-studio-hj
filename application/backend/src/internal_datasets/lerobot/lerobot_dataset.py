@@ -1,4 +1,6 @@
 import copy
+import functools
+import json
 import shutil
 from functools import lru_cache
 from pathlib import Path
@@ -20,7 +22,7 @@ from loguru import logger
 from internal_datasets.access_mode import DatasetAccessMode
 from internal_datasets.dataset_client import DatasetClient
 from internal_datasets.lerobot.episode_task import set_episode_task
-from internal_datasets.lerobot.video_encoding_settings import VideoEncodingSettings
+from internal_datasets.lerobot.video_encoding_settings import VideoEncodingSettings, depth_features
 from internal_datasets.mutations.recording_mutation import RecordingMutation
 from schemas import Episode, EpisodeInfo, EpisodeVideo
 from settings import get_settings
@@ -71,8 +73,15 @@ class InternalLeRobotDataset(DatasetClient):
                 )
             self.has_episodes = self._dataset.num_episodes > 0
 
-    def _resolved_recording_video_encoding_settings_write(self) -> dict:
-        return self._recording_video_encoding_settings.to_lerobot_write_kwargs()
+    def _resolved_recording_video_encoding_settings_write(self, features: dict | None = None) -> dict:
+        """LeRobot writer arguments for ``features``, or for the features already on disk."""
+        if features is None:
+            features = self._features_on_disk()
+        return self._recording_video_encoding_settings.to_lerobot_write_kwargs(depth_features(features))
+
+    def _features_on_disk(self) -> dict:
+        info = self.path / "meta/info.json"
+        return json.loads(info.read_text()).get("features", {}) if info.is_file() else {}
 
     def _resume_for_writing(self, repo_id: str | None = None) -> None:
         if not self._check_repository_exists(self.path):
@@ -108,7 +117,7 @@ class InternalLeRobotDataset(DatasetClient):
             features=features,
             robot_type=robot_type,
             use_videos=True,
-            **self._resolved_recording_video_encoding_settings_write(),
+            **self._resolved_recording_video_encoding_settings_write(features),
         )
         self.has_episodes = False
 
@@ -142,6 +151,13 @@ class InternalLeRobotDataset(DatasetClient):
     def get_video_keys(self) -> list[str]:
         return list(self._dataset.meta.video_keys)
 
+    def get_depth_keys(self) -> list[str]:
+        meta = self._dataset.meta
+        return [key for key in getattr(meta, "depth_keys", ()) if key in meta.video_keys]
+
+    def get_feature_info(self, key: str) -> dict:
+        return dict(self._dataset.meta.features.get(key, {}).get("info") or {})
+
     def get_episode_thumbnail_png(
         self,
         episode_index: int,
@@ -167,6 +183,10 @@ class InternalLeRobotDataset(DatasetClient):
         build_thumbnail = (
             self._cached_thumbnail_png_bytes if width <= 320 and height <= 240 else self._build_thumbnail_png_bytes
         )
+        if video_key in self.get_depth_keys():
+            build_thumbnail = functools.partial(
+                self._build_depth_thumbnail_png_bytes, info=json.dumps(self.get_feature_info(video_key), sort_keys=True)
+            )
         try:
             thumbnail_png = build_thumbnail(
                 str(video_path),
@@ -290,8 +310,8 @@ class InternalLeRobotDataset(DatasetClient):
 
     def start_recording_mutation(self, fps: int, features: dict, robot_type: str) -> RecordingMutation:
         """Start recording mutation."""
-        # Fail before copying the dataset if PyAV has no usable video encoder.
-        self._resolved_recording_video_encoding_settings_write()
+        # Fail before copying the dataset if PyAV has no usable video encoder, for depth too.
+        self._resolved_recording_video_encoding_settings_write(features if not self.exists_on_disk else None)
 
         settings = get_settings()
         cache_dir = settings.cache_dir / str(uuid4())
@@ -327,8 +347,9 @@ class InternalLeRobotDataset(DatasetClient):
 
         end = data["timestamp"][-1]
         episode_index = data["episode_index"].tolist()[0]
+        depth_keys = set(self._dataset.meta.depth_keys)
         video_timestamps = {
-            video_key: EpisodeVideo(start=0, end=end, path="")  # TODO: Implement path
+            video_key: EpisodeVideo(start=0, end=end, path="", is_depth=video_key in depth_keys)  # TODO: Implement path
             for video_key in self._dataset.meta.video_keys
         }
         if episode is not None:
@@ -396,11 +417,13 @@ class InternalLeRobotDataset(DatasetClient):
     def _build_videos(self, episode: EpisodeMetadata) -> dict[str, EpisodeVideo]:
         """Build video info for episode."""
         metadata = self._dataset.meta
+        depth_keys = set(metadata.depth_keys)
         return {
             video_key: EpisodeVideo(
                 start=episode[f"videos/{video_key}/from_timestamp"],
                 end=episode[f"videos/{video_key}/to_timestamp"],
                 path=str(metadata.get_video_file_path(episode["episode_index"], video_key)),
+                is_depth=video_key in depth_keys,
             )
             for video_key in metadata.video_keys
         }
@@ -457,6 +480,30 @@ class InternalLeRobotDataset(DatasetClient):
         if not encoded:
             raise RuntimeError(f"Failed to encode thumbnail PNG from '{video_path}'")
 
+        return imagebytes.tobytes()
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _build_depth_thumbnail_png_bytes(
+        video_path: str,
+        start: float,
+        width: int,
+        height: int,
+        _mtime_ns: int,
+        _size: int,
+        tolerance_s: float,
+        *,
+        info: str,
+    ) -> bytes:
+        """A colorized thumbnail of a depth video's frame at ``start``; ``info`` is the feature's info, as JSON."""
+        from internal_datasets.lerobot.depth_video import decode_depth_frame_mm
+        from utils.depth_colormap import colorize_depth
+
+        depth = decode_depth_frame_mm(Path(video_path), start, tolerance_s, json.loads(info))
+        frame = cv2.cvtColor(colorize_depth(depth), cv2.COLOR_RGB2BGR)
+        encoded, imagebytes = cv2.imencode(".png", cv2.resize(frame, (width, height), interpolation=cv2.INTER_NEAREST))
+        if not encoded:
+            raise RuntimeError(f"Failed to encode thumbnail PNG from '{video_path}'")
         return imagebytes.tobytes()
 
     def _get_episode_buffer_snapshot(self) -> dict | None:

@@ -30,8 +30,11 @@ def get_internal_read_dataset(dataset: Dataset) -> DatasetClient:
 
 def get_internal_recording_dataset(dataset: Dataset) -> DatasetClient:
     """Load a dataset in recording-mutation mode for worker flows, encoding with the configured preset."""
+    settings = get_settings()
     return InternalLeRobotDataset(
         Path(dataset.path),
         access_mode=DatasetAccessMode.RECORDING_MUTATION,
-        recording_video_encoding_settings=resolve_video_encoding_settings(get_settings().video_recording.preset),
+        recording_video_encoding_settings=resolve_video_encoding_settings(
+            settings.video_recording.preset, depth_crf=settings.depth_video_crf
+        ),
     )

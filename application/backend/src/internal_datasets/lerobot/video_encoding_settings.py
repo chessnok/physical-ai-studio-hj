@@ -1,5 +1,6 @@
 import logging
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import cache
@@ -192,16 +193,115 @@ def _normalise_preset(vcodec: str, preset: Any) -> Any:
     return _numeric_preset_choices(vcodec).get(preset, preset)
 
 
+# How depth maps are quantized into 12-bit video codes (LeRobot's log quantization, in metres).
+# Fixed for every Studio dataset, so episodes recorded with different cameras or depth ranges decode
+# alike. Depth 0 (no data) maps to code 0 and decodes back to exactly 0. The step between codes is
+# 1.3 mm at 0.3 m, 1.5 mm at 1 m and 2.1 mm at 3 m: finer than a RealSense D400's depth noise.
+DEPTH_QUANT_MIN_M = 0.0
+DEPTH_QUANT_MAX_M = 10.0
+DEPTH_QUANT_SHIFT_M = 3.5
+DEPTH_QUANT_USE_LOG = True
+_DEPTH_QUANT_FIELDS = ("depth_min", "depth_max", "shift", "use_log")
+
+
+_USABLE_DEPTH_ENCODERS: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
+"""Depth encoder configurations that encoded a frame; a failure is not remembered, so it is probed again."""
+
+
+def _is_depth_encoder_usable(vcodec: str, pix_fmt: str, options: tuple[tuple[str, str], ...]) -> bool:
+    """Probe a depth encoder configuration by encoding and muxing one 12-bit depth frame, in memory."""
+    import io
+
+    import av
+    import numpy as np
+
+    key = (vcodec, pix_fmt, options)
+    if key in _USABLE_DEPTH_ENCODERS:
+        return True
+    try:
+        with av.open(io.BytesIO(), "w", format="mp4") as container:
+            stream = container.add_stream(vcodec, 30, options=dict(options))
+            if not isinstance(stream, av.VideoStream):
+                raise ValueError(f"Codec {vcodec!r} did not create a video stream")
+            stream.pix_fmt = pix_fmt
+            stream.width, stream.height, stream.time_base = 320, 240, Fraction(1, 30)
+            frame = av.VideoFrame.from_ndarray(np.zeros((240, 320), dtype=np.uint16), format=pix_fmt)
+            frame.pts, frame.time_base = 0, Fraction(1, 30)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+    except Exception as exc:
+        logging.warning("Depth video encoder '%s' (%s) is unavailable: %s", vcodec, pix_fmt, exc)
+        return False
+    _USABLE_DEPTH_ENCODERS.add(key)
+    return True
+
+
+@dataclass
+class StudioDepthEncoderConfig(DepthEncoderConfig):
+    """How Studio encodes RealSense depth maps: 12-bit HEVC, lossless unless a CRF is configured.
+
+    LeRobot's depth defaults (HEVC Main 12, ``gray12le``, lossless) with a real-time preset, so two
+    1280x720 cameras keep up at 30 fps, and Studio's fixed quantization range (see
+    ``DEPTH_QUANT_*``). ``crf`` set switches to lossy encoding: far smaller files, at the cost of
+    errors around depth edges and holes.
+    """
+
+    vcodec: str = "hevc"
+    pix_fmt: str = "gray12le"
+    g: int | None = 2
+    crf: int | float | None = None
+    preset: int | str | None = "ultrafast"
+    fast_decode: int = 0
+    video_backend: str = "pyav"
+    extra_options: dict[str, Any] = field(default_factory=dict)
+    depth_min: float = DEPTH_QUANT_MIN_M
+    depth_max: float = DEPTH_QUANT_MAX_M
+    shift: float = DEPTH_QUANT_SHIFT_M
+    use_log: bool = DEPTH_QUANT_USE_LOG
+
+    def __post_init__(self) -> None:
+        x265_params = "log-level=error" if self.crf is not None else "lossless=1:log-level=error"
+        self.extra_options = {"x265-params": x265_params, **self.extra_options}
+        super().__post_init__()
+
+    def resolve_vcodec(self) -> None:
+        self.vcodec = VIDEO_CODECS_ALIASES.get(self.vcodec, self.vcodec)
+        options = tuple(sorted(self.get_codec_options(as_strings=True).items()))
+        if not _is_depth_encoder_usable(self.vcodec, self.pix_fmt, options):
+            raise RuntimeError(
+                f"Depth recording needs the '{self.vcodec}' video encoder with '{self.pix_fmt}' (12-bit gray) "
+                "support, which this backend's FFmpeg (PyAV) lacks. Record the RealSense camera with "
+                "output type 'color', or install a PyAV build with libx265."
+            )
+
+    @classmethod
+    def for_recording(
+        cls, crf: int | None = None, recorded: Mapping[str, Any] | None = None
+    ) -> "StudioDepthEncoderConfig":
+        """The encoder for new episodes; a dataset that has depth episodes keeps the quantization it has.
+
+        Args:
+            crf: Lossy quality (lower is better), or ``None`` for lossless.
+            recorded: The ``info`` of a depth feature already recorded, holding ``video.depth_min`` & co.
+        """
+        quantization = {
+            name: (recorded or {})[f"video.{name}"]
+            for name in _DEPTH_QUANT_FIELDS
+            if (recorded or {}).get(f"video.{name}") is not None
+        }
+        return cls(crf=crf, **quantization)
+
+
 class _UnsupportedDepthEncoderConfig(DepthEncoderConfig):
     """Keep RGB-only writers independent of LeRobot's unused depth defaults.
 
     LeRobot 0.6 eagerly constructs and validates a HEVC/gray12le depth encoder
     in both DatasetWriter and StreamingVideoEncoder, even for RGB-only data.
-    Studio's LGPL FFmpeg build cannot supply that encoder. Pass an explicit
-    placeholder instead, without probing a codec that we never use.
-
-    Replace this placeholder with a validated depth configuration when Studio
-    adds depth recording; do not silently encode depth with the RGB settings.
+    An LGPL FFmpeg build cannot supply that encoder. Pass an explicit
+    placeholder for datasets without depth instead, without probing a codec
+    that we never use; datasets with depth get :class:`StudioDepthEncoderConfig`.
     """
 
     def __post_init__(self) -> None:
@@ -209,7 +309,7 @@ class _UnsupportedDepthEncoderConfig(DepthEncoderConfig):
         pass
 
     def get_codec_options(self, encoder_threads: int | None = None, as_strings: bool = False) -> dict[str, Any]:
-        raise NotImplementedError("Depth video recording is not supported by Studio")
+        raise NotImplementedError("Depth video recording is not supported for a dataset created without depth features")
 
 
 class VideoEncodingSettings(BaseModel):
@@ -222,14 +322,25 @@ class VideoEncodingSettings(BaseModel):
     extra_options: dict[str, Any] = Field(default_factory=dict)
     encoder_threads: int | None = None
     encoder_queue_maxsize: int = 60
+    depth_crf: int | None = None
+    """Lossy depth encoding at this CRF; ``None`` encodes depth losslessly."""
 
-    def to_lerobot_write_kwargs(self) -> dict[str, Any]:
+    def to_lerobot_write_kwargs(self, depth_features: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+        """LeRobot writer arguments; ``depth_features`` are the dataset's depth features, by key, with their info.
+
+        Raises:
+            RuntimeError: The dataset has depth and this backend cannot encode it.
+        """
+        depth_encoder: DepthEncoderConfig = _UnsupportedDepthEncoderConfig()
+        if depth_features:
+            recorded = next((ft.get("info") or {} for ft in depth_features.values()), None)
+            depth_encoder = StudioDepthEncoderConfig.for_recording(self.depth_crf, recorded)
         return {
             "streaming_encoding": self.streaming_encoding,
             "encoder_threads": self.encoder_threads,
             "encoder_queue_maxsize": self.encoder_queue_maxsize,
             "rgb_encoder": self._build_rgb_encoder_config(),
-            "depth_encoder": _UnsupportedDepthEncoderConfig(),
+            "depth_encoder": depth_encoder,
         }
 
     def _build_rgb_encoder_config(self) -> StudioRGBEncoderConfig:
@@ -319,17 +430,29 @@ def available_video_encoding_presets() -> tuple[VideoEncodingPreset, ...]:
     return tuple(preset for preset in video_encoding_presets() if video_encoding_preset_is_usable(preset))
 
 
-def resolve_video_encoding_settings(preset_id: str | None) -> VideoEncodingSettings:
+def resolve_video_encoding_settings(preset_id: str | None, depth_crf: int | None = None) -> VideoEncodingSettings:
     """Resolve Default or a verified explicit preset for a recording writer.
 
     Default retains Studio's historic ``auto`` behavior: probe the ordered
     encoder candidates and use the first codec that can encode a real frame.
+    ``depth_crf`` is how depth maps are encoded (``None``: losslessly).
     """
     if preset_id is None:
-        return VideoEncodingSettings()
+        return VideoEncodingSettings(depth_crf=depth_crf)
     preset = get_video_encoding_preset(preset_id)
     if preset is None:
         raise ValueError(f"Unknown video recording preset '{preset_id}'")
     if not video_encoding_preset_is_usable(preset):
         raise ValueError(f"Video recording preset '{preset.name}' is unavailable on this backend")
-    return preset.settings.model_copy(deep=True)
+    return preset.settings.model_copy(deep=True, update={"depth_crf": depth_crf})
+
+
+def depth_features(features: Mapping[str, Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    """The depth-map features among LeRobot ``features``, as ``LeRobotDatasetMetadata.depth_keys`` tells them."""
+
+    def is_depth(feature: Mapping[str, Any]) -> bool:
+        info = feature.get("info") or {}
+        video_info = feature.get("video_info") or {}
+        return bool(info.get("is_depth_map") or info.get("video.is_depth_map") or video_info.get("video.is_depth_map"))
+
+    return {key: feature for key, feature in features.items() if is_depth(feature)}

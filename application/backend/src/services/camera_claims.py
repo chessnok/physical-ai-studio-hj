@@ -21,6 +21,8 @@ class CameraClaim:
     holder: str
     project_id: UUID
     project_name: str
+    output: str = "color"
+    """What a RealSense streams (``color``, ``depth`` or ``both``): its publisher serves one of them at a time."""
 
 
 def settings_from_camera(camera: Camera) -> tuple[int, int, int]:
@@ -31,6 +33,11 @@ def settings_from_camera(camera: Camera) -> tuple[int, int, int]:
         int(getattr(payload, "height", None) or 0),
         int(getattr(payload, "fps", None) or 0),
     )
+
+
+def output_from_camera(camera: Camera) -> str:
+    """What a camera streams: a RealSense its ``output_type``, any other camera ``color``."""
+    return str(getattr(camera.payload, "output_type", "color"))
 
 
 def _fingerprint_key(fingerprint: dict[str, Any]) -> str:
@@ -63,11 +70,13 @@ class CameraClaimRegistry:
                 if not holders:
                     continue
                 pinned = next(iter(holders.values()))
-                if pinned.settings != incoming.settings:
+                if (pinned.settings, pinned.output) != (incoming.settings, incoming.output):
                     raise CameraSettingsConflictError(
                         project_name=pinned.project_name,
                         pinned=pinned.settings,
                         requested=incoming.settings,
+                        pinned_output=pinned.output,
+                        requested_output=incoming.output,
                     )
             for incoming in claims:
                 holders = self._claims.setdefault(_fingerprint_key(incoming.fingerprint), {})

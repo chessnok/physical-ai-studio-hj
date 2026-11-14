@@ -96,3 +96,31 @@ def test_a_stale_generation_does_not_release() -> None:
     assert registry.holder_of({"serial": "cam"}) is not None
     registry.release("rt-a", generation=second)
     assert registry.holder_of({"serial": "cam"}) is None
+
+
+def test_a_realsense_cannot_stream_two_outputs_at_once() -> None:
+    from uuid import uuid4
+
+    from exceptions import CameraSettingsConflictError
+    from services.camera_claims import CameraClaim, CameraClaimRegistry
+
+    def claim(holder: str, output: str) -> CameraClaim:
+        return CameraClaim(
+            fingerprint={"serial": "243622062352"},
+            settings=(1280, 720, 30),
+            holder=holder,
+            project_id=uuid4(),
+            project_name="Alpha",
+            output=output,
+        )
+
+    registry = CameraClaimRegistry()
+    registry.claim([claim("session-a", "both")])
+    registry.claim([claim("session-b", "both")])  # same settings: they share the publisher
+    try:
+        registry.claim([claim("session-c", "color")])
+    except CameraSettingsConflictError as error:
+        assert "1280x720@30 both" in error.message
+        assert "1280x720@30 color" in error.message
+    else:
+        raise AssertionError("A second output of the same camera was allowed")
