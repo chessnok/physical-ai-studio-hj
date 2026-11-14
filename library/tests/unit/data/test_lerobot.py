@@ -372,3 +372,22 @@ def test_import_does_not_load_lerobot_policy_factory():
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_drop_depth_features_leaves_out_depth_maps_in_memory_only():
+    from types import SimpleNamespace
+
+    from physicalai.data.lerobot.dataset import drop_depth_features
+
+    features = {
+        "observation.images.top": {"dtype": "video", "shape": [4, 4, 3], "info": {"is_depth_map": False}},
+        "observation.images.top_depth": {"dtype": "video", "shape": [4, 4, 1], "info": {"is_depth_map": True}},
+    }
+    stats = {"observation.images.top": {}, "observation.images.top_depth": {}}
+    meta = SimpleNamespace(
+        info=SimpleNamespace(features=features), stats=stats, depth_keys=["observation.images.top_depth"]
+    )
+
+    assert drop_depth_features(SimpleNamespace(meta=meta)) == ["observation.images.top_depth"]
+    assert list(features) == ["observation.images.top"]
+    assert list(stats) == ["observation.images.top"]

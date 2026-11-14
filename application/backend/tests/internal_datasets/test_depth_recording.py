@@ -156,3 +156,27 @@ def test_lerobot_reads_back_the_recorded_millimetres(rgbd_dataset: InternalLeRob
         assert np.all(depth[:8, :8] == 0)
         # 12-bit log codes over 0-10 m: within half a step, under 1 mm up to 1 m and 1.5 mm at 4 m.
         assert np.abs(depth - expected).max() <= 1.5
+
+
+def test_training_leaves_the_depth_out_when_asked(rgbd_dataset: InternalLeRobotDataset) -> None:
+    from physicalai.data.lerobot.dataset import _LeRobotDatasetAdapter
+
+    from training.job import _has_depth_features
+
+    assert _has_depth_features(rgbd_dataset.path)
+    with_depth = _LeRobotDatasetAdapter(repo_id="depth", root=rgbd_dataset.path)
+    assert with_depth.observation_features["top_depth"].shape == (1, HEIGHT, WIDTH)
+
+    color_only = _LeRobotDatasetAdapter(repo_id="depth", root=rgbd_dataset.path, exclude_depth=True)
+    assert "top_depth" not in color_only.observation_features
+    assert color_only.observation_features["top"].shape == (3, HEIGHT, WIDTH)
+    assert set(color_only[0].images) == {"top"}
+
+
+def test_an_rgb_dataset_has_no_depth_to_leave_out(tmp_path: Path) -> None:
+    from training.job import _has_depth_features
+
+    assert not _has_depth_features(tmp_path)
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta" / "info.json").write_text('{"features": {"observation.images.top": {"info": {}}}}')
+    assert not _has_depth_features(tmp_path)

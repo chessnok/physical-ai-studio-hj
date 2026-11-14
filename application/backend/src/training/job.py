@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import json
 import logging
 import os
 import shutil
@@ -302,6 +303,18 @@ def _camera_layout_kwargs(spec: TrainingJobSpec) -> dict[str, Any]:
     return {"image_key_reorder_map": spec.image_key_reorder_map, "num_cameras": spec.num_cameras}
 
 
+def _has_depth_features(dataset_root: Path) -> bool:
+    """Whether the LeRobot dataset at ``dataset_root`` has depth-map features (``info.is_depth_map``)."""
+    info_path = dataset_root / "meta" / "info.json"
+    if not info_path.is_file():
+        return False
+    features = json.loads(info_path.read_text()).get("features", {})
+    return any(
+        (feature.get("info") or {}).get("is_depth_map") or (feature.get("info") or {}).get("video.is_depth_map")
+        for feature in features.values()
+    )
+
+
 @contextlib.contextmanager
 def _hf_token_env(token: SecretStr | None):
     """Scope ``HF_TOKEN`` to one training run, restoring whatever was there before.
@@ -388,6 +401,9 @@ def run_training_job(
         output_dir, cache_dir = Path(output_dir), Path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # No policy Studio trains takes depth maps: train on the color cameras of an RGB-D dataset.
+        # Passed only when there is depth, so RGB datasets also train with an older library.
+        depth_options: dict[str, Any] = {"exclude_depth": True} if _has_depth_features(Path(dataset_root)) else {}
         datamodule = LeRobotDataModule(
             repo_id=_DATASET_REPO_ID,
             root=str(dataset_root),
@@ -397,6 +413,7 @@ def run_training_job(
             # Applied to the train split only; the datamodule leaves validation
             # images untouched so eval loss stays comparable across runs.
             image_transforms=DefaultImageAugmentations() if spec.augment_images else None,
+            **depth_options,
         )
         policy = build_policy(spec, resume_from=spec.run_options.resume_from)
 

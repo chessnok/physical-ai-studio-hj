@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -31,6 +32,8 @@ else:
 
 # Number of dimensions of a single image feature (height, width, channel).
 _IMAGE_NDIM = 3
+
+logger = logging.getLogger(__name__)
 
 
 def _concat_columns(item: dict, columns: list[str], target_key: str, drop_prefix: str) -> dict:
@@ -98,6 +101,30 @@ def _combined_feature(
     )
 
 
+def drop_depth_features(dataset: LeRobotDataset) -> list[str]:
+    """Remove the depth-map features from a loaded ``LeRobotDataset``, in memory only.
+
+    LeRobot 0.6 records depth maps as video features flagged ``info.is_depth_map``. They are
+    dropped from the dataset's features and stats, so samples no longer decode them and
+    policies that take color images only never see them. The files on disk are untouched.
+
+    Args:
+        dataset: The dataset to strip; its metadata is modified in place.
+
+    Returns:
+        The keys of the dropped features.
+    """
+    meta = dataset.meta
+    dropped = list(meta.depth_keys)
+    for key in dropped:
+        meta.info.features.pop(key, None)
+        if meta.stats is not None:
+            meta.stats.pop(key, None)
+    if dropped:
+        logger.info("Ignoring depth features %s", dropped)
+    return dropped
+
+
 class _LeRobotDatasetAdapter(Dataset):
     """An internal adapter that makes a `LeRobotDataset` compatible with the `physicalai.data.Dataset` interface.
 
@@ -132,6 +159,7 @@ class _LeRobotDatasetAdapter(Dataset):
         batch_encoding_size: int = 1,
         state_columns: list[str] | None = None,
         action_columns: list[str] | None = None,
+        exclude_depth: bool = False,
     ) -> None:
         """Initialize a _LeRobotDatasetAdapter.
 
@@ -168,6 +196,8 @@ class _LeRobotDatasetAdapter(Dataset):
                 into a single ``action`` tensor (e.g. DROID's
                 ``["action.joint_position", "action.gripper_position"]``). All ``action.*`` sub-columns are
                 dropped once combined. Defaults to `None` (no combining).
+            exclude_depth (bool, optional): Leave out depth-map features (see :func:`drop_depth_features`),
+                for policies that take color images only. Defaults to `False`.
 
         Raises:
             ImportError: If `lerobot` is not installed.
@@ -195,6 +225,8 @@ class _LeRobotDatasetAdapter(Dataset):
             video_backend=video_backend,
             batch_encoding_size=batch_encoding_size,
         )
+        if exclude_depth:
+            drop_depth_features(self._lerobot_dataset)
 
     def __len__(self) -> int:
         """Get the length of the dataset.
@@ -231,6 +263,7 @@ class _LeRobotDatasetAdapter(Dataset):
         *,
         state_columns: list[str] | None = None,
         action_columns: list[str] | None = None,
+        exclude_depth: bool = False,
     ) -> _LeRobotDatasetAdapter:
         """Creates an instance of LeRobotActionDataset from an existing LeRobotDataset instance.
 
@@ -243,10 +276,14 @@ class _LeRobotDatasetAdapter(Dataset):
                 into a single ``observation.state`` tensor. Defaults to `None` (no combining).
             action_columns (list[str] | None, optional): Ordered LeRobot sub-column keys to concatenate
                 into a single ``action`` tensor. Defaults to `None` (no combining).
+            exclude_depth (bool, optional): Leave out depth-map features; this modifies the metadata of
+                ``lerobot_dataset`` (see :func:`drop_depth_features`). Defaults to `False`.
 
         Returns:
             _LeRobotDatasetAdapter: A new adapter instance that uses the provided dataset.
         """
+        if exclude_depth:
+            drop_depth_features(lerobot_dataset)
         instance = _LeRobotDatasetAdapter.__new__(_LeRobotDatasetAdapter)
         # Bypassing __init__ to set the internal dataset
         instance._lerobot_dataset = lerobot_dataset  # noqa: SLF001

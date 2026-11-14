@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from physicalai.data import DataModule
 
 from .converters import DataFormat
-from .dataset import _LeRobotDatasetAdapter
+from .dataset import _LeRobotDatasetAdapter, drop_depth_features
 from .utils.quantile_stats import augment_dataset_quantile_stats, has_quantile_stats
 
 if TYPE_CHECKING:
@@ -141,6 +141,7 @@ class LeRobotDataModule(DataModule):
         data_format: Literal["physicalai", "lerobot"] | DataFormat = "physicalai",
         state_columns: list[str] | None = None,
         action_columns: list[str] | None = None,
+        exclude_depth: bool = False,
         # Eval-loss validation
         val_split: float = 0.0,
         val_split_seed: int | None = None,
@@ -200,6 +201,9 @@ class LeRobotDataModule(DataModule):
                 into a single ``action`` tensor (e.g. DROID's
                 ``["action.joint_position", "action.gripper_position"]``). Only used with
                 ``data_format="physicalai"``. Defaults to `None` (no combining).
+            exclude_depth (bool, optional): Leave out depth-map features (LeRobot video features flagged
+                ``info.is_depth_map``), for policies that take color images only. The dataset on disk is
+                untouched. Defaults to `False`.
             val_split (float, optional): Fraction of episodes to hold out for eval-loss
                 validation (e.g. ``0.1`` for 10%). The last N episodes are used as the
                 validation set. Must be in ``[0, 1)``. ``0`` disables eval-loss validation.
@@ -303,6 +307,7 @@ class LeRobotDataModule(DataModule):
                     dataset,
                     state_columns=state_columns,
                     action_columns=action_columns,
+                    exclude_depth=exclude_depth,
                 )
                 if data_format == DataFormat.PHYSICALAI
                 else dataset
@@ -324,6 +329,7 @@ class LeRobotDataModule(DataModule):
                     batch_encoding_size=batch_encoding_size,
                     state_columns=state_columns,
                     action_columns=action_columns,
+                    exclude_depth=exclude_depth,
                 )
                 if val_episodes is not None:
                     val_eval_dataset = _LeRobotDatasetAdapter(
@@ -339,6 +345,7 @@ class LeRobotDataModule(DataModule):
                         batch_encoding_size=batch_encoding_size,
                         state_columns=state_columns,
                         action_columns=action_columns,
+                        exclude_depth=exclude_depth,
                     )
             else:
                 if LeRobotDataset is None:
@@ -358,6 +365,8 @@ class LeRobotDataModule(DataModule):
                     video_backend=video_backend,
                     batch_encoding_size=batch_encoding_size,
                 )
+                if exclude_depth:
+                    drop_depth_features(train_dataset)
         else:
             msg = "Must provide either 'repo_id' or a 'dataset' instance."
             raise ValueError(msg)
