@@ -43,17 +43,30 @@ const isEnterActivatedTarget = (target: EventTarget | null): boolean => {
     );
 };
 
-// Escape closes an open dialog, menu or listbox, and Enter acts within it; neither may also act on the
-// page behind it (such as starting, accepting or discarding an episode).
+const DIALOGS = '[role="dialog"], [role="alertdialog"]';
+const POPUPS = '[role="menu"], [role="listbox"]';
+// react-aria's toast region; its toasts are alertdialogs too.
+const TOAST_REGION = '[role="region"][data-react-aria-top-layer]';
+
+/**
+ * Whether a modal dialog, a menu or a listbox is open: Escape closes it and Enter acts within it, so
+ * neither may also act on the page behind it (such as starting, accepting or discarding an episode).
+ * A toast does not count: it is an alertdialog, but not a modal one (aria-modal="false", in the toast
+ * region), and counting it would block those hotkeys for as long as any notification is on screen.
+ */
 const hasOpenOverlay = (): boolean =>
-    document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null;
+    Array.from(document.querySelectorAll(`${DIALOGS}, ${POPUPS}`)).some(
+        (overlay) =>
+            overlay.closest(TOAST_REGION) === null &&
+            !(overlay.matches(DIALOGS) && overlay.getAttribute('aria-modal') === 'false')
+    );
 
 /**
  * Fires `handler` when `combo` (a canonical string from `keyboardEventToCombo`) is
  * pressed anywhere in the document, while `enabled`. Ignores keystrokes into text
  * inputs/content-editable elements, key-repeat events, events another handler already
  * handled, Space or Enter on a focused control that the key activates, and Enter or
- * Escape while a dialog, menu or listbox is open.
+ * Escape while a modal dialog, a menu or a listbox is open (a toast does not count).
  */
 export const useHotkey = (combo: string, handler: () => void, enabled = true): void => {
     useEffect(() => {

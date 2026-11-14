@@ -1,6 +1,6 @@
 import { ReactNode } from 'react';
 
-import { toast } from '@geti-ui/ui';
+import { toast, ToastContainer } from '@geti-ui/ui';
 import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -250,6 +250,35 @@ describe('StateSnapshotControls', () => {
         await user.keyboard('{Enter}');
         expect(startEpisode).toHaveBeenCalledTimes(3);
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('leaves Enter and Escape to the page while the "saved" toast is on screen', async () => {
+        mockSettings();
+        const requests = mockCapture();
+        const shown = rs.spyOn(toast, 'positive'); // the real toast, an alertdialog that is not modal
+        const startEpisode = rs.fn();
+        const discardEpisode = rs.fn();
+        const user = userEvent.setup();
+        render(
+            <>
+                <ToastContainer />
+                <Controls>
+                    <RecordingHotkeys start={startEpisode} discard={discardEpisode} />
+                </Controls>
+            </>
+        );
+
+        pressSpace();
+        await screen.findByText(/^Good snapshot saved to /);
+        expect(requests).toHaveLength(1);
+        expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+
+        await user.keyboard('{Enter}');
+        await user.keyboard('{Escape}');
+
+        expect(startEpisode).toHaveBeenCalledTimes(1);
+        expect(discardEpisode).toHaveBeenCalledTimes(1);
+        act(() => shown.mock.results.forEach((result) => (result.value as () => void)()));
     });
 
     it('remembers the label per project in this browser', async () => {
