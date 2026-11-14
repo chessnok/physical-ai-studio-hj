@@ -264,6 +264,15 @@ class CameraSettingsConflictError(BaseException):
         )
 
 
+class CameraDeviceConflictError(BaseException):
+    """Raised when an environment would use one physical camera twice."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message=message, error_code="camera_device_conflict", http_status=http.HTTPStatus.UNPROCESSABLE_ENTITY
+        )
+
+
 class DeviceInUseError(BaseException):
     """Raised when a runtime session holds the robot or camera being asked for."""
 

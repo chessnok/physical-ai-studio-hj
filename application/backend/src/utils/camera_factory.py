@@ -18,6 +18,8 @@ from utils.camera_publishers import CameraPublishers, camera_publishers
 from utils.v4l2_frame_interval import fix_zero_frame_intervals
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from schemas.project_camera import Camera
 
 MIGRATED_DRIVERS: frozenset[str] = frozenset({"usb_camera", "realsense", "basler", "ipcam"})
@@ -155,6 +157,24 @@ def driver_to_camera_type(driver: str) -> CameraType:
 def camera_device_key(config: Camera) -> str:
     """What identifies a camera's physical device, whatever settings it is captured with."""
     return f"{config.driver}:{json.dumps(config.fingerprint, sort_keys=True)}"
+
+
+def shared_device_conflict(cameras: Iterable[Camera]) -> str | None:
+    """Why ``cameras`` cannot be used together because two of them are one device, or ``None``.
+
+    A device is captured by one publisher with one set of settings: two rows of it (a RealSense
+    as "color" and again as "depth", say) would replace each other's publisher forever.
+    """
+    seen: dict[str, Camera] = {}
+    for camera in cameras:
+        if camera.fingerprint is None:
+            continue
+        key = camera_device_key(camera)
+        if (other := seen.get(key)) is not None:
+            hint = " Use one RealSense camera with output 'Color + depth'." if camera.driver == "realsense" else ""
+            return f"Cameras {other.name!r} and {camera.name!r} are the same device and cannot be used together.{hint}"
+        seen[key] = camera
+    return None
 
 
 class StudioSharedCamera(SharedCamera):

@@ -5,10 +5,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.schema import DatasetDB
-from exceptions import ResourceInUseError, ResourceNotFoundError, ResourceType
+from exceptions import CameraDeviceConflictError, ResourceInUseError, ResourceNotFoundError, ResourceType
+from repositories.project_camera_repo import ProjectCameraRepository
 from repositories.project_environment_repo import ProjectEnvironmentRepository
 from robots.catalog.registry import RobotCatalogRegistry
 from schemas.environment import Environment, EnvironmentWithRelations
+from utils.camera_factory import shared_device_conflict
 
 
 class EnvironmentService:
@@ -30,10 +32,25 @@ class EnvironmentService:
 
         return environment
 
+    async def _check_cameras(self, project_id: UUID, environment: Environment) -> None:
+        """Refuse an environment that uses one physical camera twice.
+
+        Raises:
+            CameraDeviceConflictError: Two of its cameras are the same device.
+        """
+        wanted = {camera.camera_id for camera in environment.cameras}
+        if len(wanted) < 2:
+            return
+        cameras = await ProjectCameraRepository(self.session, str(project_id)).get_all()
+        if (conflict := shared_device_conflict(camera for camera in cameras if camera.id in wanted)) is not None:
+            raise CameraDeviceConflictError(conflict)
+
     async def create_environment(self, project_id: UUID, environment: Environment) -> Environment:
+        await self._check_cameras(project_id, environment)
         return await self._repo(project_id).save(environment)
 
     async def update_environment(self, project_id: UUID, environment: Environment) -> EnvironmentWithRelations:
+        await self._check_cameras(project_id, environment)
         repo = self._repo(project_id)
         existing = await repo.get_by_id(environment.id)
         if existing is None:

@@ -31,6 +31,7 @@ from robots.features import sanitize_camera_name
 from runtime_session.bus import Bus, Subscription, publish_status, status_key
 from runtime_session.store import FeatureSpec, ImageSpec, Store, depth_key
 from schemas.runtime_session import CommandDone, ReloadEnvironment, SessionCamera, SessionEnvironment, StatusMessage
+from utils.camera_factory import shared_device_conflict
 from workers.base import WorkerStartupError
 from workers.camera_worker import CameraWorker, camera_observations
 from workers.robot_worker import DEFAULT_ROBOT_HZ, RobotRecipe, RobotWorker, claim_robot
@@ -111,6 +112,8 @@ async def describe_environment(
         leader = RobotRecipe.from_driver(leader_robot.id, leader_driver)
         robot_names[leader_robot.id] = leader_robot.name
 
+    if (conflict := shared_device_conflict(environment.cameras)) is not None:
+        raise ValueError(conflict)
     cameras: dict[str, Camera] = {}
     observations: dict[str, ImageSpec] = {}
     recorded_by: dict[str, Camera] = {}

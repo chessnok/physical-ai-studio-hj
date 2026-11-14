@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -118,3 +119,28 @@ def test_a_session_shows_a_cameras_color_and_a_depth_only_cameras_depth() -> Non
     from api.runtime_ws import _shown_frames
 
     assert _shown_frames(["top", "top_depth", "floor_depth", "arm"]) == ["top", "floor_depth", "arm"]
+
+
+async def test_one_camera_twice_in_an_environment_is_refused(test_environment, factory) -> None:
+    from schemas.project_camera import CameraAdapter
+
+    for output_type, name in (("color", "Top color"), ("depth", "Top depth")):
+        row = _realsense_row(name, output_type)
+        row["id"] = str(uuid4())
+        test_environment.cameras.append(CameraAdapter.validate_python(row))
+    with pytest.raises(ValueError, match=r"'Top color' and 'Top depth' are the same device.*Color \+ depth"):
+        await describe_environment(test_environment, factory)
+
+
+async def test_saving_an_environment_with_one_camera_twice_is_refused(test_environment, mocker) -> None:
+    from exceptions import CameraDeviceConflictError
+    from schemas.environment import Environment
+    from schemas.project_camera import CameraAdapter
+    from services.environment_service import EnvironmentService
+
+    cameras = [CameraAdapter.validate_python(_realsense_row(name, "color") | {"id": str(uuid4())}) for name in "AB"]
+    mocker.patch("services.environment_service.ProjectCameraRepository.get_all", AsyncMock(return_value=cameras))
+    service = EnvironmentService(MagicMock(), MagicMock())
+    environment = Environment(id=uuid4(), name="Bench", cameras=[{"camera_id": camera.id} for camera in cameras])
+    with pytest.raises(CameraDeviceConflictError, match="same device"):
+        await service.create_environment(uuid4(), environment)
