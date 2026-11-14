@@ -59,6 +59,33 @@ describe('useHotkey with Enter and Escape', () => {
         expect(handler).not.toHaveBeenCalled();
     });
 
+    it('leaves Enter to an open dialog, menu or listbox', () => {
+        const handler = rs.fn();
+        renderHook(() => useHotkey('Enter', handler));
+        const overlay = document.createElement('div');
+        document.body.appendChild(overlay);
+
+        for (const role of ['dialog', 'alertdialog', 'menu', 'listbox']) {
+            overlay.setAttribute('role', role);
+            fireEvent.keyDown(document.body, { key: 'Enter' });
+        }
+        expect(handler).not.toHaveBeenCalled();
+
+        overlay.remove();
+        fireEvent.keyDown(document.body, { key: 'Enter' });
+        expect(handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('still fires Space with a dialog open', () => {
+        const handler = rs.fn();
+        renderHook(() => useHotkey(' ', handler));
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        document.body.appendChild(dialog);
+        fireEvent.keyDown(dialog, { key: ' ' });
+        expect(handler).toHaveBeenCalledTimes(1);
+    });
+
     it('ignores a key another handler already handled', () => {
         const handler = rs.fn();
         renderHook(() => useHotkey('Escape', handler));

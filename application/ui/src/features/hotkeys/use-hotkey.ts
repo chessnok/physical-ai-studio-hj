@@ -43,7 +43,8 @@ const isEnterActivatedTarget = (target: EventTarget | null): boolean => {
     );
 };
 
-// Escape closes an open dialog, menu or listbox first; it must not also act on the page behind it.
+// Escape closes an open dialog, menu or listbox, and Enter acts within it; neither may also act on the
+// page behind it (such as starting, accepting or discarding an episode).
 const hasOpenOverlay = (): boolean =>
     document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null;
 
@@ -51,8 +52,8 @@ const hasOpenOverlay = (): boolean =>
  * Fires `handler` when `combo` (a canonical string from `keyboardEventToCombo`) is
  * pressed anywhere in the document, while `enabled`. Ignores keystrokes into text
  * inputs/content-editable elements, key-repeat events, events another handler already
- * handled, Space or Enter on a focused control that the key activates, and Escape
- * while a dialog, menu or listbox is open.
+ * handled, Space or Enter on a focused control that the key activates, and Enter or
+ * Escape while a dialog, menu or listbox is open.
  */
 export const useHotkey = (combo: string, handler: () => void, enabled = true): void => {
     useEffect(() => {
@@ -67,7 +68,7 @@ export const useHotkey = (combo: string, handler: () => void, enabled = true): v
                 isTypingTarget(e.target) ||
                 (e.key === ' ' && isSpaceActivatedTarget(e.target)) ||
                 (e.key === 'Enter' && isEnterActivatedTarget(e.target)) ||
-                (e.key === 'Escape' && hasOpenOverlay())
+                ((e.key === 'Escape' || e.key === 'Enter') && hasOpenOverlay())
             ) {
                 return;
             }
