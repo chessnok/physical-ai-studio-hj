@@ -1,4 +1,5 @@
-export type HotkeyActionId = 'recording.start_episode' | 'recording.accept_episode' | 'recording.discard_episode';
+export type HotkeyActionId =
+    'recording.start_episode' | 'recording.accept_episode' | 'recording.discard_episode' | 'session.capture_snapshot';
 
 type HotkeyActionDefinition = {
     label: string;
@@ -21,6 +22,12 @@ export const HOTKEY_ACTIONS: Record<HotkeyActionId, HotkeyActionDefinition> = {
         label: 'Discard episode',
         scope: 'Recording',
         defaultCombo: 'ArrowLeft',
+    },
+    // Read-only, so it may fire anywhere a session is live, recording or not.
+    'session.capture_snapshot': {
+        label: 'Capture state snapshot',
+        scope: 'Live session',
+        defaultCombo: ' ',
     },
 };
 

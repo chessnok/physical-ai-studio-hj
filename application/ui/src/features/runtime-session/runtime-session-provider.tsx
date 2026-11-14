@@ -37,6 +37,7 @@ import {
     SchemaUnloadModelCommand,
 } from '../../api/openapi-spec';
 import { JointsState } from '../robots/use-robot-observations';
+import { StateSnapshotHotkey } from './state-snapshot-hotkey';
 
 /** Session errors go away by themselves; the parts panel keeps showing what is still failed. */
 export const ERROR_TOAST = { timeout: 10_000 };
@@ -325,7 +326,15 @@ export const RuntimeSessionProvider = ({
         [state, error, statuses, loading, observations, frame, send, retry]
     );
 
-    return <RuntimeSessionContext.Provider value={value}>{children}</RuntimeSessionContext.Provider>;
+    return (
+        <RuntimeSessionContext.Provider value={value}>
+            {children}
+            {/* Wherever a session has an environment, its hotkey saves a state snapshot. */}
+            {state?.environment != null && (
+                <StateSnapshotHotkey project_id={project_id} session_id={state.session_id} />
+            )}
+        </RuntimeSessionContext.Provider>
+    );
 };
 
 export const useRuntimeSession = () => {

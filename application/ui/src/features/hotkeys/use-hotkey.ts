@@ -15,10 +15,23 @@ const isTypingTarget = (target: EventTarget | null): boolean => {
     );
 };
 
+// Space activates the focused button, switch, checkbox or option; leave it to that control.
+const SPACE_ACTIVATED_ROLES = new Set(['button', 'checkbox', 'switch', 'radio', 'option', 'menuitem', 'tab', 'slider']);
+
+const isSpaceActivatedTarget = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) {
+        return false;
+    }
+
+    const role = target.getAttribute('role');
+    return target instanceof HTMLButtonElement || (role !== null && SPACE_ACTIVATED_ROLES.has(role));
+};
+
 /**
  * Fires `handler` when `combo` (a canonical string from `keyboardEventToCombo`) is
  * pressed anywhere in the document, while `enabled`. Ignores keystrokes into text
- * inputs/content-editable elements and key-repeat events.
+ * inputs/content-editable elements, key-repeat events, and Space on a focused
+ * control that Space activates.
  */
 export const useHotkey = (combo: string, handler: () => void, enabled = true): void => {
     useEffect(() => {
@@ -27,7 +40,7 @@ export const useHotkey = (combo: string, handler: () => void, enabled = true): v
         }
 
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.repeat || isTypingTarget(e.target)) {
+            if (e.repeat || isTypingTarget(e.target) || (e.key === ' ' && isSpaceActivatedTarget(e.target))) {
                 return;
             }
 
