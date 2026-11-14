@@ -11,6 +11,7 @@ import { useProjectId } from '../../projects/use-project';
 import { CameraCell } from '../../runtime-session/cells/camera-cell';
 import { RobotCell } from '../../runtime-session/cells/robot-cell';
 import { RuntimeSessionProvider } from '../../runtime-session/runtime-session-provider';
+import { StateSnapshotControls } from '../../runtime-session/state-snapshot-controls';
 import { ReactComponent as RobotIllustration } from './../../../assets/illustrations/INTEL_08_NO-TESTS.svg';
 import { EnvironmentForm, EnvironmentFormState, useEnvironmentForm } from './provider';
 
@@ -188,9 +189,16 @@ export const Preview = () => {
         return (
             <View height='100%'>
                 <RuntimeSessionProvider project_id={project_id} environment={toDraft(environment)}>
-                    <Suspense fallback={<CenteredLoading />}>
-                        <ActualPreview />
-                    </Suspense>
+                    <Flex direction='column' height='100%'>
+                        <View paddingX='size-200' paddingY='size-100'>
+                            <StateSnapshotControls layout='row' />
+                        </View>
+                        <View flex minHeight={0} position='relative'>
+                            <Suspense fallback={<CenteredLoading />}>
+                                <ActualPreview />
+                            </Suspense>
+                        </View>
+                    </Flex>
                 </RuntimeSessionProvider>
             </View>
         );

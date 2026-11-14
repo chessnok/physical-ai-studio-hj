@@ -4,6 +4,7 @@ import { Button, Divider, Flex, Grid, Item, Loading, minmax, Picker, Text, View 
 
 import { SessionPartName, useRuntimeSession } from '../runtime-session-provider';
 import { SessionViewer } from '../session-viewer';
+import { StateSnapshotControls } from '../state-snapshot-controls';
 import { InferenceMode } from './inference-mode';
 import { PartControlsProvider, usePartControls } from './part-controls';
 import { PartsPanel } from './parts-panel';
@@ -99,6 +100,7 @@ export const SessionWorkspace = ({ initialMode, cancelHref }: { initialMode: Mod
                         <Suspense fallback={<Loading mode='inline' />}>
                             <PartsPanel />
                         </Suspense>
+                        <StateSnapshotControls />
                         <Divider size='S' />
                         <Picker
                             label='Mode'
