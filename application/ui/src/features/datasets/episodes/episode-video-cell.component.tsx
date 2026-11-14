@@ -67,6 +67,8 @@ export const EpisodeVideoCell = ({ videoId, datasetId }: { videoId: string; data
                           dataset_id: datasetId,
                           video_path: episodeVideo.path,
                       },
+                      // Depth is recorded as 12-bit video browsers cannot play: ask for a colorized copy.
+                      query: episodeVideo.is_depth ? { depth_preview: true } : undefined,
                   },
               });
 

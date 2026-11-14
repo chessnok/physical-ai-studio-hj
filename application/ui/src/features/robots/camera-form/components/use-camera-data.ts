@@ -15,14 +15,24 @@ export const useAllAvailableCameras = () => {
     return $api.useSuspenseQuery('get', '/api/hardware/cameras');
 };
 
-export const useSupportedFormats = (driver: CameraDriver, fingerprint: CameraFingerprint | null | undefined) => {
+export type RealsenseOutputType = 'color' | 'depth' | 'both';
+
+export const useSupportedFormats = (
+    driver: CameraDriver,
+    fingerprint: CameraFingerprint | null | undefined,
+    outputType?: RealsenseOutputType
+) => {
     const query = $api.useQuery(
         'get',
         '/api/cameras/supported_formats/{driver}',
         {
             params: {
                 path: { driver },
-                query: { fingerprint: fingerprintKey(fingerprint) ?? '' },
+                query: {
+                    fingerprint: fingerprintKey(fingerprint) ?? '',
+                    // A RealSense offers other modes for depth, and fewer on USB 2.
+                    ...(outputType !== undefined ? { output_type: outputType } : {}),
+                },
             },
         },
         { enabled: !!fingerprint }

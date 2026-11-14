@@ -15,7 +15,7 @@ const TOP = 'observation.images.top';
 const WRIST = 'observation.images.wrist';
 const STORAGE_PREFIX = 'physicalai:thumbnailCamera:';
 
-const mockDatasetCameras = (datasetId: string, videoKeys: string[]) => {
+const mockDatasetCameras = (datasetId: string, videoKeys: string[], depthKeys: string[] = []) => {
     server.use(
         http.get('/api/dataset/{dataset_id}/episodes', ({ params }) =>
             params.dataset_id === datasetId ? HttpResponse.json(getMockedEpisodes()) : undefined
@@ -25,7 +25,10 @@ const mockDatasetCameras = (datasetId: string, videoKeys: string[]) => {
                 ? HttpResponse.json(
                       getMockedEpisodeDetail({
                           videos: Object.fromEntries(
-                              videoKeys.map((key) => [key, { start: 0, end: 3, path: `${key}.mp4` }])
+                              [...videoKeys, ...depthKeys].map((key) => [
+                                  key,
+                                  { start: 0, end: 3, path: `${key}.mp4`, is_depth: depthKeys.includes(key) },
+                              ])
                           ),
                       })
                   )
@@ -56,6 +59,17 @@ describe('useThumbnailCamera', () => {
 
         expect(result.current.thumbnailCamera).toBe(WRIST);
         expect(localStorage.getItem(`${STORAGE_PREFIX}dataset-1`)).toBe(WRIST);
+    });
+
+    it('leaves RealSense depth maps out of the cameras', async () => {
+        mockDatasetCameras('dataset-1', [TOP], [`${TOP}_depth`]);
+
+        const { result } = renderHook(() => useThumbnailCamera('dataset-1'));
+
+        await waitFor(() => expect(result.current.cameras).toHaveLength(1));
+
+        expect(result.current.cameras.map((camera) => camera.key)).toEqual([TOP]);
+        expect(result.current.thumbnailCamera).toBe(TOP);
     });
 
     it('falls back to the first camera when nothing is stored and persists a selection', async () => {

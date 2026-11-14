@@ -2,7 +2,7 @@ import { Item, Picker } from '@geti-ui/ui';
 
 import { CameraFingerprint } from '../../../cameras/fingerprint';
 import { CameraDriver } from '../provider';
-import { useSupportedFormats } from './use-camera-data';
+import { RealsenseOutputType, useSupportedFormats } from './use-camera-data';
 
 interface FpsPickerProps {
     driver: CameraDriver;
@@ -11,10 +11,19 @@ interface FpsPickerProps {
     height: number | undefined;
     selectedFps: number | undefined;
     onSelect: (fps: number) => void;
+    outputType?: RealsenseOutputType;
 }
 
-export const FpsPicker = ({ driver, fingerprint, width, height, selectedFps, onSelect }: FpsPickerProps) => {
-    const supportedFormats = useSupportedFormats(driver, fingerprint);
+export const FpsPicker = ({
+    driver,
+    fingerprint,
+    width,
+    height,
+    selectedFps,
+    onSelect,
+    outputType,
+}: FpsPickerProps) => {
+    const supportedFormats = useSupportedFormats(driver, fingerprint, outputType);
 
     const resolution = supportedFormats.find((r) => r.width === width && r.height === height);
     const supportedFps = resolution?.fps ?? [];

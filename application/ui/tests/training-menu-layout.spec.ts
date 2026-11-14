@@ -45,7 +45,7 @@ for (const policy of policies) {
                     tasks: [],
                     actions: [],
                     action_keys: [],
-                    videos: { 'observation.images.top': { start: 0, end: 3, path: 'top.mp4' } },
+                    videos: { 'observation.images.top': { start: 0, end: 3, path: 'top.mp4', is_depth: false } },
                 })
             )
         );

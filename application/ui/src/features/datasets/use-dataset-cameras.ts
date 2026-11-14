@@ -42,12 +42,15 @@ export const useDatasetCameras = (datasetId: string | undefined): UseDatasetCame
         { enabled: datasetId !== undefined && firstEpisodeIndex !== undefined }
     );
 
+    // Depth maps (RealSense ``<camera>_depth``) are not cameras a policy or a thumbnail uses.
     const cameras = useMemo(
         () =>
-            Object.keys(episode?.videos ?? {}).map((key) => ({
-                key,
-                name: key.startsWith(IMAGE_KEY_PREFIX) ? key.slice(IMAGE_KEY_PREFIX.length) : key,
-            })),
+            Object.entries(episode?.videos ?? {})
+                .filter(([, video]) => !video.is_depth)
+                .map(([key]) => ({
+                    key,
+                    name: key.startsWith(IMAGE_KEY_PREFIX) ? key.slice(IMAGE_KEY_PREFIX.length) : key,
+                })),
         [episode]
     );
 

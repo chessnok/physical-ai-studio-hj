@@ -7,6 +7,7 @@ export const getMockedEpisodeVideo = (overrides: Partial<SchemaEpisodeVideo> = {
     start: 0,
     end: 3,
     path: 'video.mp4',
+    is_depth: false,
     ...overrides,
 });
 

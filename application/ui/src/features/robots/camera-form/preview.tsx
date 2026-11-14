@@ -35,9 +35,16 @@ export const Preview = () => {
         ...cameraForm,
     };
 
-    // Make sure we completely refresh the camera preview when changing camera or resolution
-    // eslint-disable-next-line max-len
-    const key = `${camera.driver}-${fingerprintKey(camera.fingerprint)}-${camera.payload?.fps}-${camera.payload?.height}-${camera.payload?.width}`;
+    // Make sure we completely refresh the camera preview when changing camera, resolution or RealSense output
+    const outputType = camera.driver === 'realsense' ? camera.payload?.output_type : undefined;
+    const key = [
+        camera.driver,
+        fingerprintKey(camera.fingerprint),
+        camera.payload?.fps,
+        camera.payload?.height,
+        camera.payload?.width,
+        outputType,
+    ].join('-');
 
     return (
         <View height={'100%'} position={'relative'}>

@@ -111,8 +111,8 @@ const mockProjectWithRemoteTrainer = (datasets = [testDataset, otherDataset]) =>
                 actions: [],
                 action_keys: [],
                 videos: {
-                    'observation.images.top': { start: 0, end: 3, path: 'top.mp4' },
-                    'observation.images.wrist': { start: 0, end: 3, path: 'wrist.mp4' },
+                    'observation.images.top': { start: 0, end: 3, path: 'top.mp4', is_depth: false },
+                    'observation.images.wrist': { start: 0, end: 3, path: 'wrist.mp4', is_depth: false },
                 },
             })
         ),

@@ -2,7 +2,7 @@ import { Item, Picker } from '@geti-ui/ui';
 
 import { CameraFingerprint } from '../../../cameras/fingerprint';
 import { CameraDriver } from '../provider';
-import { useSupportedFormats } from './use-camera-data';
+import { RealsenseOutputType, useSupportedFormats } from './use-camera-data';
 
 interface Resolution {
     width: number;
@@ -15,10 +15,17 @@ interface ResolutionPickerProps {
     fingerprint: CameraFingerprint | null | undefined;
     selectedResolution: { width: number | undefined; height: number | undefined } | undefined;
     onSelect: (resolution: Resolution) => void;
+    outputType?: RealsenseOutputType;
 }
 
-export const ResolutionPicker = ({ driver, fingerprint, selectedResolution, onSelect }: ResolutionPickerProps) => {
-    const supportedResolutions = useSupportedFormats(driver, fingerprint);
+export const ResolutionPicker = ({
+    driver,
+    fingerprint,
+    selectedResolution,
+    onSelect,
+    outputType,
+}: ResolutionPickerProps) => {
+    const supportedResolutions = useSupportedFormats(driver, fingerprint, outputType);
 
     const selectedKey =
         selectedResolution?.width && selectedResolution?.height
