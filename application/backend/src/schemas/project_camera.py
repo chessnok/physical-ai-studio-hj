@@ -1,7 +1,7 @@
 from abc import ABC
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from schemas.base import BaseIDModel, UTCDatetime
 
@@ -65,14 +65,37 @@ class BaslerCameraPayload(BaseModel):
 
 
 class RealsenseCameraPayload(BaseModel):
-    """Configuration for RealsenseCapture."""
+    """Configuration for an Intel RealSense camera.
+
+    ``width``/``height``/``fps`` is the color mode, and the depth mode for depth-only output. With
+    ``both``, depth is aligned to the color image, so both have the color resolution.
+    """
 
     width: int = Field(640, ge=424, le=1920, description="Frame width in pixels")
     height: int = Field(480, ge=240, le=1080, description="Frame height in pixels")
     fps: int = Field(30, ge=6, le=90, description="Frames per second")
-    depth_range_min: float = Field(0.3, ge=0.1, le=5.0, description="Minimum depth detection range in meters")
-    depth_range_max: float = Field(3.0, ge=1.0, le=10.0, description="Maximum depth detection range in meters")
-    output_type: Literal["color", "depth", "both"] = Field("color", description="Type of output frames")
+    depth_range_min: float = Field(
+        0.3, ge=0.1, le=5.0, description="Nearest valid depth in meters; nearer depth is recorded as 0 (no data)"
+    )
+    depth_range_max: float = Field(
+        3.0, ge=1.0, le=10.0, description="Farthest valid depth in meters; farther depth is recorded as 0 (no data)"
+    )
+    output_type: Literal["color", "depth", "both"] = Field(
+        "color",
+        description=(
+            "What to stream and record: 'color' (observation.images.<camera>), 'depth' "
+            "(observation.images.<camera>_depth, millimetres) or 'both' (depth aligned to color)"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_depth_range(self) -> "RealsenseCameraPayload":
+        """Reject a depth range that keeps no depth at all."""
+        if self.depth_range_min >= self.depth_range_max:
+            raise ValueError(
+                f"depth_range_min ({self.depth_range_min} m) must be below depth_range_max ({self.depth_range_max} m)"
+            )
+        return self
 
 
 class GenicamCameraPayload(BaseModel):
@@ -173,11 +196,14 @@ class RealsenseCamera(BaseCamera):
                 "name": "depth_camera",
                 "driver": "realsense",
                 "fingerprint": {"serial": "123456789"},
-                "hardware_name": "Intel RealSense D435",
+                "hardware_name": "Intel RealSense D415",
                 "payload": {
-                    "width": 640,
-                    "height": 480,
+                    "width": 1280,
+                    "height": 720,
                     "fps": 30,
+                    "output_type": "both",
+                    "depth_range_min": 0.3,
+                    "depth_range_max": 3.0,
                 },
             }
         }

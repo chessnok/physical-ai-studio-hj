@@ -40,6 +40,17 @@ _DRIVER_TO_CLASS_PATH: dict[str, str] = {
     "ipcam": "physicalai.capture.IPCamera",
 }
 
+# What Studio's own publishers capture with, where it differs from the portable class above:
+# physicalai's RealSenseCamera streams depth at the color resolution and publishes color only.
+_DRIVER_TO_CAPTURE_CLASS_PATH: dict[str, str] = {
+    "realsense": "utils.realsense_rgbd.RealSenseRGBDCamera",
+}
+
+# Depth resolutions of Intel RealSense D400 cameras, for a portable recipe that has to pick one blindly.
+_D400_DEPTH_SIZES: frozenset[tuple[int, int]] = frozenset(
+    {(1280, 720), (848, 480), (640, 480), (640, 360), (480, 270), (424, 240)}
+)
+
 # Per-driver kwargs that are safe to pass through to the nested camera recipe.
 _ALLOWED_KWARGS: dict[str, frozenset[str]] = {
     "usb_camera": frozenset({"width", "height", "fps"}),
@@ -50,7 +61,10 @@ _ALLOWED_KWARGS: dict[str, frozenset[str]] = {
 
 
 def build_camera_config(config: Camera) -> Config:
-    """Build a camera configuration from a config schema."""
+    """Build the portable ``physicalai.capture`` recipe for a camera, as a runtime export runs it.
+
+    Studio captures some drivers with its own class instead; see :func:`build_capture_config`.
+    """
     class_path = _DRIVER_TO_CLASS_PATH[config.driver]
     allowed = _ALLOWED_KWARGS.get(config.driver, frozenset())
 
@@ -69,7 +83,56 @@ def build_camera_config(config: Camera) -> Config:
             raise ValueError(f"Camera fingerprint for {config.driver!r} must include a non-empty 'serial'")
         init_args["serial_number"] = serial
 
+    if config.driver == "realsense":
+        # physicalai's RealSenseCamera always streams depth too, by default at the color resolution,
+        # which the depth sensor may lack (1920x1080, 960x540): give it one it has.
+        width, height = init_args.get("width", 640), init_args.get("height", 480)
+        depth = (
+            (width, height) if (width, height) in _D400_DEPTH_SIZES else (1280, 720) if width >= 1280 else (848, 480)
+        )
+        init_args["depth_width"], init_args["depth_height"] = depth
+
     return Config(class_path, init_args)
+
+
+def build_capture_config(config: Camera) -> Config:
+    """Build the recipe Studio's camera publisher captures with.
+
+    A RealSense camera is captured with :class:`utils.realsense_rgbd.RealSenseRGBDCamera`, which
+    streams what ``output_type`` asks for (color, depth aligned to color, or both) and fails with
+    the modes the device offers on its current USB connection when the requested one is not among
+    them. Every other driver uses its portable recipe.
+    """
+    if config.driver != "realsense":
+        return build_camera_config(config)
+    payload = config.payload
+    serial = (config.fingerprint or {}).get("serial")
+    if not config.fingerprint:
+        raise ValueError("Camera must be reselected")
+    if not isinstance(serial, str) or not serial:
+        raise ValueError("Camera fingerprint for 'realsense' must include a non-empty 'serial'")
+    return Config(
+        _DRIVER_TO_CAPTURE_CLASS_PATH["realsense"],
+        {
+            "serial_number": serial,
+            "width": payload.width,
+            "height": payload.height,
+            "fps": payload.fps,
+            "output_type": payload.output_type,
+        },
+    )
+
+
+def capture_service_name(config: Camera) -> str | None:
+    """The shared-memory service a camera's publisher serves, when it is not the derived default.
+
+    A RealSense publisher delivers only the streams of its ``output_type``, so each output type
+    gets its own service: a subscriber never attaches to a publisher that lacks the streams it needs.
+    """
+    if config.driver != "realsense":
+        return None
+    serial = (config.fingerprint or {}).get("serial")
+    return f"physicalai/camera/RealSenseRGBDCamera/{serial}-{config.payload.output_type}/frame"
 
 
 def is_migrated(driver: str) -> bool:
@@ -122,11 +185,12 @@ def build_shared_camera(
         # A replugged UVC camera may report a 1/0 frame interval, which fails the open.
         fix_zero_frame_intervals()
 
-    camera_config = build_camera_config(config)
+    camera_config = build_capture_config(config)
     logger.debug(f"camera config for {config.name}: {camera_config}")
 
     return SharedCamera(
         camera=camera_config,
+        service_name=capture_service_name(config),
         color_mode=ColorMode.RGB,
         validate_on_connect=validate_on_connect,
         overwrite_settings=overwrite_settings,

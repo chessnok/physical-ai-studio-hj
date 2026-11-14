@@ -71,3 +71,44 @@ def test_stream_endpoint_overwrites_settings_of_an_unclaimed_camera() -> None:
             assert build.call_args.kwargs["overwrite_settings"] is True
     finally:
         app.dependency_overrides.clear()
+
+
+def test_supported_formats_of_a_realsense_follow_its_output_type() -> None:
+    client = _client(CameraClaimRegistry())
+    try:
+        with patch(
+            "utils.realsense_rgbd.RealSenseRGBDCamera.query_formats", return_value=[(1280, 720, 15), (1280, 720, 30)]
+        ) as query:
+            fingerprint = quote(json.dumps({"serial": "243622062352"}))
+            response = client.get(
+                f"/api/cameras/supported_formats/realsense?fingerprint={fingerprint}&output_type=both"
+            )
+            again = client.get(f"/api/cameras/supported_formats/realsense?fingerprint={fingerprint}")
+        assert response.status_code == 200
+        assert response.json() == [{"width": 1280, "height": 720, "fps": [15, 30]}]
+        # Not cached: replugging into another USB port changes what the camera offers.
+        assert [call.args for call in query.call_args_list] == [
+            ({"serial": "243622062352"}, "both"),
+            ({"serial": "243622062352"}, "color"),
+        ]
+        assert again.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_a_realsense_preview_shows_color_or_else_colorized_depth() -> None:
+    import numpy as np
+
+    from utils.jpeg import encode_jpeg_camera_frame
+    from utils.realsense_rgbd import pack_rgbd
+
+    color = np.zeros((4, 6, 3), np.uint8)
+    depth = np.full((4, 6), 1000, np.uint16)
+    with patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg") as encode:
+        encode_jpeg_camera_frame(pack_rgbd(color, depth))
+        assert encode.call_args.args[0].shape == (4, 6, 3)
+        assert encode.call_args.args[0] is not None
+        encode_jpeg_camera_frame(pack_rgbd(None, depth))
+        shown = encode.call_args.args[0]
+        assert shown.shape == (4, 6, 3)
+        assert shown.dtype == np.uint8

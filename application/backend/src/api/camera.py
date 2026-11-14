@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections import defaultdict
 from functools import cache
-from typing import Annotated
+from typing import Annotated, Literal
 
 import anyio
 from fastapi import APIRouter, Depends, Query, WebSocket, status
@@ -19,6 +19,8 @@ from utils.camera_factory import build_shared_camera
 from workers.rate import Rate
 
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
+
+RealsenseOutputType = Literal["color", "depth", "both"]
 
 
 def _formats_to_response(raw: list[tuple[int, int, int]]) -> list[SupportedCameraFormat]:
@@ -52,19 +54,29 @@ def _query_formats(driver: str, fingerprint_key: str) -> list[SupportedCameraFor
 
         return _formats_to_response(UVCCamera.query_formats(deserialized_fingerprint))
 
-    if driver == "realsense":
-        from physicalai.capture.cameras.realsense import RealSenseCamera
-
-        return _formats_to_response(RealSenseCamera.query_formats(deserialized_fingerprint))
-
     msg = f"Format discovery not supported for driver {driver!r}"
     raise ValueError(msg)
+
+
+def _query_realsense_formats(fingerprint: dict, output_type: RealsenseOutputType) -> list[SupportedCameraFormat]:
+    """The modes a RealSense offers for ``output_type`` on its current USB connection.
+
+    Not cached: listing them does not open the camera, and they change when it is replugged
+    into another port (USB 2 offers far fewer).
+    """
+    from utils.realsense_rgbd import RealSenseRGBDCamera
+
+    return _formats_to_response(RealSenseRGBDCamera.query_formats(fingerprint, output_type))
 
 
 @router.get("/supported_formats/{driver}")
 async def get_supported_formats(
     driver: str,
     fingerprint: str,
+    output_type: Annotated[
+        RealsenseOutputType,
+        Query(description="RealSense only: the modes for color, depth, or color with depth aligned to it"),
+    ] = "color",
 ) -> list[SupportedCameraFormat]:
     """Returns the supported camera resolution and fps associated to the camera."""
     try:
@@ -73,6 +85,8 @@ async def get_supported_formats(
         raise ValueError(f"Unable to parse fingerprint into a dictionary: {e}") from e
     if not isinstance(parsed, dict) or not parsed:
         raise ValueError("Camera fingerprint must be a non-empty JSON object")
+    if driver == "realsense":
+        return await asyncio.to_thread(_query_realsense_formats, parsed, output_type)
     fingerprint_key = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
     return _query_formats(driver, fingerprint_key)
 
@@ -119,7 +133,7 @@ async def camera_websocket(
         Server sends jpeg encoded bytes, or one JSON error before closing:
             {"event": "error", "message": str, "error_code": str}
     """
-    from utils.jpeg import encode_jpeg_rgb
+    from utils.jpeg import encode_jpeg_camera_frame
 
     await websocket.accept()
 
@@ -139,7 +153,7 @@ async def camera_websocket(
             while True:
                 frame = await asyncio.to_thread(shared_camera.read_latest)
                 if frame.sequence != sent:
-                    await websocket.send_bytes(await asyncio.to_thread(encode_jpeg_rgb, frame.data))
+                    await websocket.send_bytes(await asyncio.to_thread(encode_jpeg_camera_frame, frame.data))
                     sent = frame.sequence
                 await rate.sleep()
         finally:
