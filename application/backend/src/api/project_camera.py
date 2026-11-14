@@ -14,6 +14,12 @@ router = APIRouter(prefix="/api/projects/{project_id}/cameras", tags=["Project C
 ProjectID = UUID
 
 
+def _require_valid_payload(camera: Camera) -> None:
+    problem = getattr(camera.payload, "depth_range_problem", lambda: None)()
+    if problem is not None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=problem)
+
+
 def _require_fingerprint(fingerprint: dict[str, Any] | None) -> dict[str, Any]:
     if not fingerprint:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Camera must be reselected")
@@ -45,6 +51,7 @@ async def create_project_camera(
 ) -> Camera:
     """Create a new camera."""
     _require_fingerprint(camera.fingerprint)
+    _require_valid_payload(camera)
     return await camera_service.create_camera(project_id, camera)
 
 
@@ -70,6 +77,7 @@ async def update_project_camera(
     existing = await camera_service.get_camera_by_id(project_id, camera_id)
     _ensure_not_claimed(existing.fingerprint, claims)
     _ensure_not_claimed(_require_fingerprint(camera.fingerprint), claims)
+    _require_valid_payload(camera)
     camera_with_id = camera.model_copy(update={"id": camera_id})
 
     return await camera_service.update_camera(

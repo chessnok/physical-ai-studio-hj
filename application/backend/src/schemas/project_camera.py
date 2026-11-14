@@ -1,7 +1,7 @@
 from abc import ABC
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from schemas.base import BaseIDModel, UTCDatetime
 
@@ -88,14 +88,16 @@ class RealsenseCameraPayload(BaseModel):
         ),
     )
 
-    @model_validator(mode="after")
-    def check_depth_range(self) -> "RealsenseCameraPayload":
-        """Reject a depth range that keeps no depth at all."""
+    def depth_range_problem(self) -> str | None:
+        """Why the depth range keeps no depth at all, or ``None``.
+
+        Checked when a camera is saved, not when one is read: a stored row must stay readable.
+        """
         if self.depth_range_min >= self.depth_range_max:
-            raise ValueError(
+            return (
                 f"depth_range_min ({self.depth_range_min} m) must be below depth_range_max ({self.depth_range_max} m)"
             )
-        return self
+        return None
 
 
 class GenicamCameraPayload(BaseModel):

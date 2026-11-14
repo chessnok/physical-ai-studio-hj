@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from schemas.project_camera import CameraAdapter
 from utils.camera_factory import build_camera_config, build_capture_config, build_shared_camera, capture_service_name
@@ -80,9 +79,24 @@ def test_realsense_without_a_serial_must_be_reselected():
         build_capture_config(camera)
 
 
-def test_depth_range_must_keep_some_depth():
-    with pytest.raises(ValidationError, match="depth_range_min"):
-        _realsense(depth_range_min=3.0, depth_range_max=2.0)
+def test_a_depth_range_that_keeps_no_depth_is_reported_but_stays_readable():
+    from workers.camera_worker import depth_range_mm
+
+    stored = _realsense(depth_range_min=3.0, depth_range_max=2.0)  # a row saved before ranges were checked
+    assert "depth_range_min" in (stored.payload.depth_range_problem() or "")
+    assert depth_range_mm(stored) is None  # recorded unfiltered rather than all zeros
+    assert _realsense().payload.depth_range_problem() is None
+    assert depth_range_mm(_realsense()) == (300, 3000)
+
+
+def test_saving_a_depth_range_that_keeps_no_depth_is_refused():
+    from fastapi import HTTPException
+
+    from api.project_camera import _require_valid_payload
+
+    with pytest.raises(HTTPException, match="depth_range_min"):
+        _require_valid_payload(_realsense(depth_range_min=3.0, depth_range_max=2.0))
+    _require_valid_payload(_realsense())
 
 
 def test_realsense_payload_defaults_stay_color_only():

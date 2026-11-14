@@ -59,6 +59,11 @@ def depth_range_mm(config: Camera) -> tuple[int, int] | None:
     """The depth a RealSense camera keeps, in millimetres; ``None`` for a camera without depth."""
     if config.driver != "realsense" or not output_has_depth(config.payload.output_type):
         return None
+    if config.payload.depth_range_problem() is not None:  # a stored row from before ranges were checked
+        logger.warning(
+            "Camera {!r}: {}; recording its depth unfiltered", config.name, config.payload.depth_range_problem()
+        )
+        return None
     return round(config.payload.depth_range_min * 1000), round(config.payload.depth_range_max * 1000)
 
 

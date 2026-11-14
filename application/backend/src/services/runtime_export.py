@@ -173,6 +173,10 @@ async def build_runtime_config(
 
     camera_configs: dict[str, dict[str, Any]] = {}
     for camera in cameras:
+        if camera.driver == "realsense" and camera.payload.output_type == "depth":
+            # The runtime reads color frames, and Studio's policies train without depth maps.
+            logger.info("Leaving depth-only camera {!r} out of the runtime export", camera.name)
+            continue
         key = sanitize_camera_name(camera.name)
         if key in camera_configs:
             raise ValueError(f"Camera names collide after sanitizing: {camera.name!r}")

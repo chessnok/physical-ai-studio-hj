@@ -221,3 +221,24 @@ def test_a_depth_encoder_that_falls_behind_is_caught(tmp_path: Path, monkeypatch
     assert any(problem.startswith("top_depth:") and "for 20 rows" in problem for problem in problems)
     assert not any(problem.startswith("top:") for problem in problems)
     dataset.finalize()
+
+
+def test_a_depth_preview_keeps_only_the_latest_version_of_a_video(tmp_path: Path) -> None:
+    from internal_datasets.lerobot import depth_video
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"v1")
+    old_preview = depth_video.depth_preview_path(video, tmp_path)
+    old_preview.parent.mkdir(parents=True)
+    old_preview.write_bytes(b"old")
+    other = old_preview.parent / "0123456789abcdef-0123456789abcdef.mp4"
+    other.write_bytes(b"other video")
+    video.write_bytes(b"v2, appended")  # recording appended an episode
+
+    new_preview = depth_video.depth_preview_path(video, tmp_path)
+    new_preview.write_bytes(b"new")
+    depth_video._evict(new_preview)
+
+    assert new_preview != old_preview
+    assert not old_preview.exists()
+    assert other.exists()  # another video's preview stays, within the cache size

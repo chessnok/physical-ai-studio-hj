@@ -118,7 +118,10 @@ async def test_a_camera_named_like_another_ones_depth_is_refused(test_environmen
 def test_a_session_shows_a_cameras_color_and_a_depth_only_cameras_depth() -> None:
     from api.runtime_ws import _shown_frames
 
-    assert _shown_frames(["top", "top_depth", "floor_depth", "arm"]) == ["top", "floor_depth", "arm"]
+    color, depth = ImageSpec(2, 2), ImageSpec.depth(2, 2)
+    shown = _shown_frames({"top": color, "top_depth": depth, "floor_depth": depth, "arm": color, "arm_depth": color})
+    # A color camera that happens to be named like another one's depth stays shown.
+    assert shown == ["top", "floor_depth", "arm", "arm_depth"]
 
 
 async def test_one_camera_twice_in_an_environment_is_refused(test_environment, factory) -> None:

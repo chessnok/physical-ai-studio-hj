@@ -260,3 +260,24 @@ async def test_inference_export_document_validates_with_a_policy_source(mocker: 
     )
     validate_config(document)
     assert document["init_args"]["action_source"]["class_path"] == "physicalai.runtime.PolicySource"
+
+
+async def test_a_depth_only_realsense_is_left_out_of_the_export(mocker: Any) -> None:
+    _stub_device_paths(mocker)
+    depth_only = CameraAdapter.validate_python(
+        {
+            "driver": "realsense",
+            "name": "Top depth",
+            "fingerprint": {"serial": "243622062352"},
+            "hardware_name": "Intel RealSense D415",
+            "payload": {"width": 640, "height": 480, "fps": 30, "output_type": "depth"},
+        }
+    )
+    document = await build_runtime_config(
+        follower=_robot("follower"),
+        leader=None,
+        cameras=[_camera(), depth_only],
+        fps=30,
+        robot_factory=_robot_factory(),
+    )
+    assert document["init_args"]["cameras"].keys() == {"overhead camera"}

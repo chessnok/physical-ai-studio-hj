@@ -10,7 +10,7 @@ and the store is sampled at ``hz`` into one binary observation per tick. See
 """
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Mapping
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -35,7 +35,7 @@ from runtime_session import session as runtime_session
 from runtime_session.bus import STATUSES, Bus, BusRequestError, NoResponderError, Subscription, command_key
 from runtime_session.resolve import project_resolvers
 from runtime_session.session import RuntimeSession
-from runtime_session.store import ACTION, DEPTH_SUFFIX, STATE, Sample
+from runtime_session.store import ACTION, DEPTH_SUFFIX, STATE, ImageSpec, Sample
 from schemas.runtime_session import (
     AckMessage,
     ObservationFrame,
@@ -216,12 +216,12 @@ async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float
         await rate.sleep()
 
 
-def _shown_frames(observations: Collection[str]) -> list[str]:
+def _shown_frames(observations: Mapping[str, ImageSpec]) -> list[str]:
     """The frames a session shows: every camera's, but not the depth map of a camera that has color too."""
     return [
         key
-        for key in observations
-        if not (key.endswith(DEPTH_SUFFIX) and key.removesuffix(DEPTH_SUFFIX) in observations)
+        for key, image in observations.items()
+        if not (image.is_depth and key.endswith(DEPTH_SUFFIX) and key.removesuffix(DEPTH_SUFFIX) in observations)
     ]
 
 

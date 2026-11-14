@@ -58,11 +58,34 @@ def decode_depth_frame_mm(
     return _to_millimetres(np.asarray(codes[0]), depth_quantization(info))
 
 
+PREVIEW_CACHE_BYTES = 2 * 1024**3
+"""How much the cached previews may take; the least recently used go first."""
+
+
 def depth_preview_path(video_path: Path, cache_dir: Path) -> Path:
-    """Where the preview of ``video_path`` is cached; a new one when the video changes, as recording appends to it."""
+    """Where the preview of ``video_path`` is cached; a new one when the video changes, as recording appends to it.
+
+    ``<video>-<version>.mp4``: the video's part names every version of it, so older ones can be dropped.
+    """
     stat = video_path.stat()
-    key = hashlib.sha256(f"{video_path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:32]
-    return cache_dir / "depth_previews" / f"{key}.mp4"
+    source = hashlib.sha256(str(video_path.resolve()).encode()).hexdigest()[:16]
+    version = hashlib.sha256(f"{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:16]
+    return cache_dir / "depth_previews" / f"{source}-{version}.mp4"
+
+
+def _evict(preview: Path) -> None:
+    """Drop the previews of older versions of the same video, then the least recently used beyond the cap."""
+    source = preview.name.split("-", 1)[0]
+    others = [path for path in preview.parent.glob("*.mp4") if path != preview and ".part." not in path.name]
+    for path in others:
+        if path.name.startswith(f"{source}-"):
+            path.unlink(missing_ok=True)
+    kept = sorted((path for path in others if path.exists()), key=lambda path: path.stat().st_atime, reverse=True)
+    total = preview.stat().st_size
+    for path in kept:
+        total += path.stat().st_size
+        if total > PREVIEW_CACHE_BYTES:
+            path.unlink(missing_ok=True)
 
 
 def ensure_depth_preview(video_path: Path, cache_dir: Path, info: Mapping[str, Any] | None) -> Path:
@@ -83,6 +106,7 @@ def ensure_depth_preview(video_path: Path, cache_dir: Path, info: Mapping[str, A
                 partial.replace(preview)
             finally:
                 partial.unlink(missing_ok=True)
+            _evict(preview)
     return preview
 
 
