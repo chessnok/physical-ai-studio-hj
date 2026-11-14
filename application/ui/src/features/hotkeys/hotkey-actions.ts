@@ -11,17 +11,17 @@ export const HOTKEY_ACTIONS: Record<HotkeyActionId, HotkeyActionDefinition> = {
     'recording.start_episode': {
         label: 'Start episode',
         scope: 'Recording',
-        defaultCombo: 'ArrowRight',
+        defaultCombo: 'Enter',
     },
     'recording.accept_episode': {
         label: 'Accept episode',
         scope: 'Recording',
-        defaultCombo: 'ArrowRight',
+        defaultCombo: 'Enter',
     },
     'recording.discard_episode': {
         label: 'Discard episode',
         scope: 'Recording',
-        defaultCombo: 'ArrowLeft',
+        defaultCombo: 'Escape',
     },
     // Read-only, so it may fire anywhere a session is live, recording or not.
     'session.capture_snapshot': {

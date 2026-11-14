@@ -8,6 +8,8 @@ const DISPLAY_KEY_LABELS: Record<string, string> = {
     ArrowUp: '↑',
     ArrowDown: '↓',
     ' ': 'Space',
+    Enter: 'Enter',
+    Escape: 'Esc',
 };
 
 const modifierPrefix = (e: Pick<KeyboardEvent, 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): string[] => {
