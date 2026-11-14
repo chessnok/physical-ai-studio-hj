@@ -5,10 +5,12 @@ Kept next to the snapshot folders, at ``<storage>/state_snapshots/<project>/snap
 commas, quotes or line breaks is quoted, so read it with a CSV reader, not line by line).
 
 Each snapshot's ``state.json`` is the source of truth; the index is derived from it. A capture
-appends its row; editing a label, or finding the index missing, unreadable or out of step with the
-folders, rewrites it from every ``state.json`` (:func:`rebuild`). Every change holds the project's
-lock (threads, and processes through ``snapshots.csv.lock``) and lands whole: an appended row in
-one write, a rebuilt index by an atomic rename.
+appends its row; editing a label, or finding the index missing, unreadable or different from what
+the ``state.json`` files say, rewrites it from all of them (:func:`rebuild`). Every change holds the
+project's lock (threads, and processes through ``snapshots.csv.lock``) and lands whole: an appended
+row in one write, a rebuilt index by an atomic rename. An edit marks the index stale
+(``snapshots.csv.dirty``) before it touches a ``state.json``, so that an edit cut short (a crash, a
+full disk) is repaired by the next capture or download.
 
 Columns, in this order (stable; new columns are only ever added at the end):
 
@@ -52,6 +54,8 @@ if TYPE_CHECKING:
 
 CSV_NAME = "snapshots.csv"
 LOCK_NAME = f"{CSV_NAME}.lock"
+DIRTY_NAME = f"{CSV_NAME}.dirty"
+"""Present while an edit may have changed a ``state.json`` that the index does not show yet."""
 STATE_FILE = "state.json"
 JOINT_COLUMNS = 6
 """Joint columns per robot: an SO-101 has six; a robot with more has the rest in ``state.json`` only."""
@@ -143,11 +147,11 @@ def append(project_root: Path, document: dict[str, Any]) -> None:
     """
     with locked(project_root):
         path = project_root / CSV_NAME
-        ids = _indexed_ids(path)
-        if ids is None:
+        rows = _current_rows(project_root)
+        if rows is None:
             _rebuild_locked(project_root)
             return
-        if str(document.get("snapshot_id")) in ids:
+        if str(document.get("snapshot_id")) in {line[0] for line in rows}:
             return
         # A whole row in one write, under the lock: no reader or writer sees half of it.
         with path.open("ab") as index:
@@ -163,7 +167,10 @@ def rebuild(project_root: Path) -> int:
 
 
 def ensure(project_root: Path) -> bool:
-    """Rebuild the index if it is missing, unreadable, or does not list every snapshot exactly once.
+    """Rebuild the index unless it holds exactly the rows the snapshots' ``state.json`` files make.
+
+    So it is rebuilt if it is missing, unreadable, marked stale, lists a snapshot twice or not at
+    all, or any value differs (a label edited by hand, or an edit cut short).
 
     Returns:
         Whether it was rebuilt.
@@ -189,11 +196,15 @@ def contents(project_root: Path, *, rebuild_first: bool = False) -> bytes:
 def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dict[str, Any]:
     """Change fields of a snapshot's ``state.json`` (such as its label), then rebuild the index.
 
+    The index is marked stale first. If it cannot be rebuilt once ``state.json`` is changed, the
+    change stands and the index stays marked, for the next capture or download to rebuild it.
+
     Returns:
         The updated ``state.json``.
 
     Raises:
         FileNotFoundError: There is no such snapshot.
+        OSError: ``state.json`` could not be changed; it is as it was.
     """
     folder = project_root / snapshot_id
     if folder.resolve().parent != project_root.resolve() or not (folder / STATE_FILE).is_file():
@@ -201,8 +212,12 @@ def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dic
     with locked(project_root):
         document = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
         document.update(changes)
+        (project_root / DIRTY_NAME).touch()
         write_json(folder / STATE_FILE, document)
-        _rebuild_locked(project_root)
+        try:
+            _rebuild_locked(project_root)
+        except OSError:
+            logger.exception("Changed {} but could not rebuild {}; the next check will", folder.name, CSV_NAME)
         return document
 
 
@@ -269,29 +284,39 @@ def _documents(project_root: Path) -> list[tuple[str, dict[str, Any]]]:
 
 
 def _ensure_locked(project_root: Path) -> bool:
-    ids = _indexed_ids(project_root / CSV_NAME)
-    if ids is not None and sorted(ids) == [name for name, _ in _documents(project_root)]:
+    rows = _current_rows(project_root)
+    expected = [_row_or_placeholder(document) for _, document in _documents(project_root)]
+    # In any order: appended rows follow the order captures finished in.
+    if rows is not None and sorted(rows) == sorted(expected):
         return False
-    _rebuild_locked(project_root)
+    _write_locked(project_root, expected)
     return True
 
 
 def _rebuild_locked(project_root: Path) -> int:
-    documents = _documents(project_root)
+    rows = [_row_or_placeholder(document) for _, document in _documents(project_root)]
+    _write_locked(project_root, rows)
+    return len(rows)
+
+
+def _write_locked(project_root: Path, rows: list[list[str]]) -> None:
     path = project_root / CSV_NAME
     partial = path.with_name(f".{CSV_NAME}.{os.getpid()}.{threading.get_ident()}.tmp")
-    partial.write_bytes(_encode([_row_or_placeholder(document) for _, document in documents], header=True))
+    partial.write_bytes(_encode(rows, header=True))
     partial.replace(path)  # atomic: a reader sees the old index or the new one
-    logger.info("Rebuilt {} with {} snapshot(s)", path, len(documents))
-    return len(documents)
+    (project_root / DIRTY_NAME).unlink(missing_ok=True)
+    logger.info("Rebuilt {} with {} snapshot(s)", path, len(rows))
 
 
-def _indexed_ids(path: Path) -> list[str] | None:
-    """The snapshot ids the index lists, or None if it is missing or not exactly as this module writes it.
+def _current_rows(project_root: Path) -> list[list[str]] | None:
+    """The index's rows, or None if it is marked stale, missing, or not exactly as this module writes it.
 
     Not as written: another header, a row of another width, an id twice, or no line end after the
     last row (an append would run into it).
     """
+    if (project_root / DIRTY_NAME).exists():
+        return None
+    path = project_root / CSV_NAME
     try:
         data = path.read_bytes()
         rows = list(csv.reader(io.StringIO(data.decode("utf-8"), newline="")))
@@ -302,4 +327,4 @@ def _indexed_ids(path: Path) -> list[str] | None:
     if any(len(line) != len(COLUMNS) for line in rows[1:]):
         return None
     ids = [line[0] for line in rows[1:]]
-    return ids if len(set(ids)) == len(ids) else None
+    return rows[1:] if len(set(ids)) == len(ids) else None

@@ -297,6 +297,75 @@ def test_updating_a_label_rewrites_state_json_and_the_index(tmp_path) -> None:
     ]
 
 
+def test_a_value_differing_from_state_json_is_rebuilt(tmp_path) -> None:
+    for index in range(2):
+        snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(index), comment="before"))
+    state = tmp_path / _snapshot_id(1) / "state.json"
+    snapshot_index.write_json(state, json.loads(state.read_text()) | {"defective": True, "comment": "by hand"})
+
+    assert snapshot_index.ensure(tmp_path)
+
+    assert [(row["defective"], row["comment"]) for row in _rows(tmp_path)] == [("false", "before"), ("true", "by hand")]
+    assert not snapshot_index.ensure(tmp_path)
+
+
+def _disk_full(*_args, **_kwargs):
+    raise OSError(28, "No space left on device")
+
+
+def test_an_edit_cut_short_after_state_json_is_repaired_by_the_next_check(tmp_path, monkeypatch) -> None:
+    for index in range(2):
+        snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(index)))
+    write = snapshot_index._write_locked
+    monkeypatch.setattr(snapshot_index, "_write_locked", _disk_full)
+
+    # The label is changed (state.json is the truth); the index cannot be rewritten yet.
+    document = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": "dent"})
+
+    assert (document["defective"], document["comment"]) == (True, "dent")
+    state = json.loads((tmp_path / _snapshot_id(1) / "state.json").read_text())
+    assert (state["defective"], state["comment"]) == (True, "dent")
+    assert _rows(tmp_path)[1]["defective"] == "false"  # stale, and marked so
+    assert (tmp_path / snapshot_index.DIRTY_NAME).exists()
+
+    monkeypatch.setattr(snapshot_index, "_write_locked", write)
+    downloaded = snapshot_index.contents(tmp_path)  # what the CSV download serves
+
+    rows = list(csv.DictReader(io.StringIO(downloaded.decode("utf-8"), newline="")))
+    assert [(row["defective"], row["comment"]) for row in rows] == [("false", ""), ("true", "dent")]
+    assert not (tmp_path / snapshot_index.DIRTY_NAME).exists()
+
+
+def test_a_capture_after_an_edit_cut_short_repairs_the_index(tmp_path, monkeypatch) -> None:
+    snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(0)))
+    write = snapshot_index._write_locked
+    monkeypatch.setattr(snapshot_index, "_write_locked", _disk_full)
+    snapshot_index.update(tmp_path, _snapshot_id(0), {"comment": "dent"})
+    monkeypatch.setattr(snapshot_index, "_write_locked", write)
+
+    snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(1)))  # the next capture
+
+    assert [(row["snapshot_id"], row["comment"]) for row in _rows(tmp_path)] == [
+        (_snapshot_id(0), "dent"),
+        (_snapshot_id(1), ""),
+    ]
+    assert not (tmp_path / snapshot_index.DIRTY_NAME).exists()
+
+
+def test_an_edit_whose_state_json_cannot_be_written_changes_nothing(tmp_path, monkeypatch) -> None:
+    snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(0), comment="before"))
+
+    monkeypatch.setattr(snapshot_index, "write_json", _disk_full)
+    with pytest.raises(OSError, match="No space"):
+        snapshot_index.update(tmp_path, _snapshot_id(0), {"comment": "after"})
+    monkeypatch.undo()
+
+    assert json.loads((tmp_path / _snapshot_id(0) / "state.json").read_text())["comment"] == "before"
+    snapshot_index.ensure(tmp_path)
+    assert _rows(tmp_path)[0]["comment"] == "before"
+    assert not (tmp_path / snapshot_index.DIRTY_NAME).exists()
+
+
 @pytest.mark.parametrize("snapshot_id", ["20261114-030000-999", "..", "../other-project/20261114-030000-000"])
 def test_updating_a_missing_snapshot_fails(tmp_path, snapshot_id) -> None:
     project = tmp_path / "project"

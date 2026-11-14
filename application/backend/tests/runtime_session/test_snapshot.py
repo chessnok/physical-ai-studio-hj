@@ -440,11 +440,28 @@ def test_the_csv_download_is_rebuilt_when_missing_or_damaged(client, live, proje
     rows = _download(client, project)
     assert [(row["defective"], row["comment"]) for row in rows] == [("true", ""), ("false", "b, c")]
 
-    # Edited by hand: only an explicit rebuild picks that up, since the index still lists every snapshot.
+    # Edited by hand: the download serves what state.json says.
     state_path = Path(second["path"]) / "state.json"
     state_path.write_text(json.dumps(json.loads(state_path.read_text()) | {"comment": "by hand"}))
-    assert _download(client, project)[1]["comment"] == "b, c"
+    assert _download(client, project)[1]["comment"] == "by hand"
     assert _download(client, project, rebuild="true")[1]["comment"] == "by hand"
+
+
+def test_a_label_change_whose_csv_cannot_be_rewritten_still_counts(client, live, project, monkeypatch) -> None:
+    created = _capture(client, live, project)
+    write = snapshot_index._write_locked
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(snapshot_index, "_write_locked", disk_full)
+    response = client.patch(_url(project, f"/{created['snapshot_id']}"), json={"defective": True, "comment": "dent"})
+    monkeypatch.setattr(snapshot_index, "_write_locked", write)
+
+    assert response.status_code == 200
+    assert (response.json()["defective"], response.json()["comment"]) == (True, "dent")
+    (row,) = _download(client, project)
+    assert (row["defective"], row["comment"]) == ("true", "dent")
 
 
 def test_snapshots_from_before_labels_are_unlabelled_until_labelled(client, live, project) -> None:
