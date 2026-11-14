@@ -375,6 +375,18 @@ docker volume rm physicalai-trainer-data
 | GET    | `/devices`            | Trainer compute devices.              |
 | GET    | `/health`             | Liveness and image/protocol metadata. |
 
+### Spec compatibility
+
+The `spec` in `POST /jobs` (and in `spec.json` for AWS Batch and Modal) is a
+`training.TrainingJobSpec`, which rejects fields it does not know. So Studio
+leaves the early-stopping fields (`early_stopping_patience`,
+`early_stopping_min_delta`) out of every spec while early stopping is off, and
+`snapflow_start_epoch` out of `POST /jobs` while SnapFlow is off: an ordinary
+job still runs on a trainer built before those features existed. A job that
+turns such a feature on fails on an older trainer instead of silently training
+without it; for early stopping, Studio reports that the trainer has to be
+updated.
+
 ## Security
 
 - HTTP-uploaded datasets are validated before extraction: ZIP-only, size and

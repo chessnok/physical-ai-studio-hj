@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -19,8 +20,9 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from loguru import logger
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
+from tests.old_trainer import EARLY_STOPPING_FIELDS, old_trainer_rejection, pre_early_stopping_spec_model
 
 from schemas.base_job import JobStatus
 from schemas.dataset import Snapshot
@@ -32,6 +34,7 @@ from services.training_backends._transfer_progress import TransferProgressLogger
 from services.training_backends.base import TrainingContext
 from services.training_backends.local import build_spec
 from services.training_backends.remote import SNAPSHOT_UPLOAD_PROGRESS, TRAINING_PROGRESS_END, RemoteTrainingError
+from training.job import EARLY_STOPPING_UNSUPPORTED_MESSAGE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -887,6 +890,64 @@ class TestHttpDatasetTransfer:
 
         assert body["spec"]["snapflow_start_epoch"] == 8
         assert body["spec"]["max_epochs"] == 11
+
+    @pytest.mark.anyio
+    async def test_submit_omits_early_stopping_when_it_is_off(self, tmp_path):
+        """An ordinary run stays submittable to a trainer that predates early stopping."""
+        body = await _submitted_body(_settings(), _context(tmp_path))
+
+        assert not set(EARLY_STOPPING_FIELDS) & set(body["spec"])
+        assert old_trainer_rejection(json.dumps(body["spec"])) is None
+
+    @pytest.mark.anyio
+    async def test_submit_sends_early_stopping_when_it_is_asked_for(self, tmp_path):
+        context = _context(tmp_path, early_stopping_patience=3, early_stopping_min_delta=0.05)
+
+        body = await _submitted_body(_settings(), context)
+
+        assert (body["spec"]["early_stopping_patience"], body["spec"]["early_stopping_min_delta"]) == (3, 0.05)
+
+    @pytest.mark.anyio
+    async def test_a_trainer_without_early_stopping_fails_the_job_with_a_clear_message(self, tmp_path):
+        """The trainer rejects the unknown fields with a 422; Studio says what to do instead of passing it on."""
+
+        def old_trainer(request: httpx.Request) -> httpx.Response:
+            if request.method != "POST" or not request.url.path.endswith("/jobs"):
+                return httpx.Response(200, json={})  # e.g. the proxy probe
+            # What FastAPI answers when the request body fails validation against an older spec.
+            try:
+                pre_early_stopping_spec_model().model_validate(json.loads(request.content)["spec"])
+            except ValidationError as exc:
+                detail = [{**error, "loc": ["body", "spec", *error["loc"]]} for error in exc.errors(include_url=False)]
+                return httpx.Response(422, json={"detail": detail})
+            return httpx.Response(200, json={"remote_job_id": str(uuid4())})
+
+        settings = _settings()
+        transport = httpx.MockTransport(old_trainer)
+        (tmp_path / "off").mkdir()
+        (tmp_path / "on").mkdir()
+        with (
+            patch(f"{REMOTE}.get_settings", return_value=settings),
+            patch(f"{REMOTE}.httpx.AsyncClient", partial(httpx.AsyncClient, transport=transport)),
+        ):
+            backend = _backend(settings)
+            # Without early stopping, the same trainer takes the job.
+            assert isinstance(await backend.submit_job(_context(tmp_path / "off")), UUID)
+            with pytest.raises(RemoteTrainingError) as raised:
+                await backend.submit_job(_context(tmp_path / "on", early_stopping_patience=3))
+
+        assert str(raised.value) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
+
+    @pytest.mark.anyio
+    async def test_other_submission_errors_are_raised_as_before(self, tmp_path):
+        settings = _settings()
+        transport = httpx.MockTransport(lambda _request: httpx.Response(503, json={"detail": "busy"}))
+        with (
+            patch(f"{REMOTE}.get_settings", return_value=settings),
+            patch(f"{REMOTE}.httpx.AsyncClient", partial(httpx.AsyncClient, transport=transport)),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await _backend(settings).submit_job(_context(tmp_path, early_stopping_patience=3))
 
     @pytest.mark.anyio
     async def test_submit_body_omits_the_studios_device_selection(self, tmp_path):

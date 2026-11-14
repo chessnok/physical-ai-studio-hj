@@ -3,6 +3,7 @@
 
 """Exercise native Modal jobs without credentials, network access, or GPUs."""
 
+import json
 from datetime import UTC, datetime
 from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
@@ -13,6 +14,7 @@ import modal
 import pytest
 from physicalai.data.archive_safety import ZipBombDetectedError
 from pydantic import SecretStr, ValidationError
+from tests.old_trainer import EARLY_STOPPING_FIELDS, old_trainer_rejection
 
 from exceptions import InvalidResourceError
 from schemas.job import RemoteJobIdAdapter, RemoteTrainJobPayload, TrainingDevice, TrainJobPayloadAdapter
@@ -26,6 +28,7 @@ from services.training_service import TrainingService
 from services.training_targets.remote import RemoteTrainingTargetHandler
 from trainer.batch.status import BatchJobStatus
 from training import TrainingJobSpec
+from training.job import EARLY_STOPPING_UNSUPPORTED_MESSAGE
 
 MODULE = "services.training_backends.modal"
 CALL_ID = "fc-0123456789ABCDEF"
@@ -462,6 +465,54 @@ async def test_failure_status_and_native_failure_do_not_download(context, resour
     with pytest.raises(RuntimeError, match="out of memory"):
         await ModalTrainingBackend(connection).train(context)
     call.cancel.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_spec_stays_valid_for_a_modal_app_without_early_stopping(context, resources, connection):
+    """The deployed app may run older trainer code, which forbids unknown spec fields."""
+    _, volume, _, _ = resources
+
+    await ModalTrainingBackend(connection).train(context)
+
+    uploader = volume.batch_upload.return_value.__enter__.return_value
+    spec_json = uploader.put_file.call_args_list[1].args[0].getvalue().decode()
+    assert not set(EARLY_STOPPING_FIELDS) & set(json.loads(spec_json))
+    assert old_trainer_rejection(spec_json) is None
+
+
+@pytest.mark.asyncio
+async def test_an_early_stopping_spec_is_uploaded_with_its_settings(context, resources, connection, monkeypatch):
+    _, volume, _, _ = resources
+    monkeypatch.setattr(
+        f"{MODULE}.build_spec",
+        lambda context: TrainingJobSpec(policy="act", early_stopping_patience=4, early_stopping_min_delta=0.01),
+    )
+
+    await ModalTrainingBackend(connection).train(context)
+
+    uploader = volume.batch_upload.return_value.__enter__.return_value
+    spec = TrainingJobSpec.model_validate_json(uploader.put_file.call_args_list[1].args[0].getvalue())
+    assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (4, 0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_modal_app_without_early_stopping_fails_the_job_with_a_clear_message(context, resources, connection):
+    """The old batch worker writes the raw validation error; Studio says to redeploy instead."""
+    _, _, call, files = resources
+    context.remote_job_id = CALL_ID
+    rejection = old_trainer_rejection(
+        TrainingJobSpec(policy="act", early_stopping_patience=4).model_dump_json(exclude={"run_options"})
+    )
+    files[f"jobs/{context.job.id}/status.json"] = (
+        BatchJobStatus(status="failed", message=rejection, updated_at=datetime.now(UTC)).model_dump_json().encode()
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await ModalTrainingBackend(connection).train(context)
+
+    assert str(raised.value) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
+    call.cancel.assert_called_once()
+    assert not context.output_dir.exists()
 
 
 @pytest.mark.asyncio

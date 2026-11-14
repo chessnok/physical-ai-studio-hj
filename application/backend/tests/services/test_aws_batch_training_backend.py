@@ -12,6 +12,7 @@ import pytest
 import yaml
 from botocore.exceptions import ClientError, SSOTokenLoadError
 from pydantic import SecretStr
+from tests.old_trainer import old_trainer_rejection
 
 from schemas.job import RemoteTrainJobPayload, TrainJobPayloadAdapter
 from schemas.remote_trainer import AwsBatchConnection, RemoteTrainer
@@ -23,6 +24,7 @@ from services.training_backends.base import TrainingCanceledError, TrainingConte
 from services.training_targets.remote import RemoteTrainingTargetHandler
 from trainer.batch.status import BatchJobStatus
 from training import TrainingJobSpec
+from training.job import EARLY_STOPPING_UNSUPPORTED_MESSAGE
 
 MODULE = "services.training_backends.aws_batch"
 
@@ -357,6 +359,24 @@ async def test_runner_failure_is_reported(context, aws) -> None:
     s3.get_object.side_effect = None
     with pytest.raises(RuntimeError, match="Missing policy dependency"):
         await (await get_training_backend(context.payload)).train(context)
+
+
+@pytest.mark.asyncio
+async def test_an_image_without_early_stopping_fails_the_job_with_a_clear_message(context, aws) -> None:
+    batch, s3 = aws
+    context.remote_job_id = uuid4()
+    batch.describe_jobs.return_value = {"jobs": [{"status": "FAILED", "statusReason": "Essential container exited"}]}
+    rejection = old_trainer_rejection(
+        TrainingJobSpec(policy="act", early_stopping_patience=3).model_dump_json(exclude={"run_options"})
+    )
+    status = BatchJobStatus(status="failed", progress=0, message=rejection, updated_at=datetime.now(UTC))
+    s3.get_object.return_value = {"Body": BytesIO(status.model_dump_json().encode())}
+    s3.get_object.side_effect = None
+
+    with pytest.raises(RuntimeError) as raised:
+        await (await get_training_backend(context.payload)).train(context)
+
+    assert str(raised.value) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
 
 
 @pytest.mark.asyncio

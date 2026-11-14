@@ -33,6 +33,7 @@ from services.training_backends._transfer_progress import TransferProgressLogger
 from services.training_backends.artifacts import extract_training_artifact
 from services.training_backends.base import TrainingCanceledError, TrainingSuspendedError
 from settings import get_settings
+from training.job import explain_trainer_rejection
 from training.log_format import render_progress_log
 
 if TYPE_CHECKING:
@@ -374,7 +375,13 @@ class RemoteTrainingBackend:
         }
         async with await self._client() as client:
             response = await client.post(f"{self._base_url}/jobs", json=body)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                # A trainer that predates early stopping rejects its fields with a bare 422.
+                if explanation := explain_trainer_rejection(exc.response.text):
+                    raise RemoteTrainingError(explanation) from exc
+                raise
             data = response.json()
 
         remote_job_id = data.get("remote_job_id")

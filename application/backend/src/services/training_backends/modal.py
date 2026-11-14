@@ -27,6 +27,7 @@ from services.training_backends.base import TrainingCanceledError, TrainingSuspe
 from services.training_backends.local import build_spec, resolve_hf_token
 from settings import get_settings
 from trainer.batch.status import BatchJobStatus
+from training.job import explain_trainer_rejection
 from training.log_format import render_progress_log
 
 if TYPE_CHECKING:
@@ -190,7 +191,9 @@ class ModalTrainingBackend:
                         return
                     if status.status in {"failed", "canceled"}:
                         await asyncio.to_thread(call.cancel)
-                        raise RuntimeError(status.message or "Modal training failed")
+                        raise RuntimeError(
+                            explain_trainer_rejection(status.message) or status.message or "Modal training failed"
+                        )
                 try:
                     code = await asyncio.to_thread(call.get, timeout=0)
                 except (modal.exception.FunctionTimeoutError, modal.exception.OutputExpiredError):

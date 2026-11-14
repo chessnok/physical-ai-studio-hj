@@ -23,6 +23,7 @@ from services.training_backends.base import TrainingCanceledError, TrainingSuspe
 from services.training_backends.local import build_spec, resolve_hf_token
 from settings import get_settings
 from trainer.batch.status import BatchJobStatus
+from training.job import explain_trainer_rejection
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -254,7 +255,9 @@ class AwsBatchTrainingBackend:
             if status and status.status == "failed":
                 if job["status"] not in {"FAILED", "SUCCEEDED"}:
                     await asyncio.to_thread(self._terminate, job_id, reason="Trainer reported failure")
-                raise RuntimeError(status.message or "AWS Batch training failed")
+                raise RuntimeError(
+                    explain_trainer_rejection(status.message) or status.message or "AWS Batch training failed"
+                )
             if job["status"] == "FAILED":
                 reason = status.message if status and status.status == "failed" else job.get("statusReason")
                 raise RuntimeError(reason or "AWS Batch training failed")
