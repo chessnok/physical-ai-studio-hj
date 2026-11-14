@@ -121,6 +121,8 @@ class LoadedEnvironment:
     state: SessionEnvironment
     robot_type: str
     """The follower's type, which a new dataset records."""
+    row: EnvironmentWithRelations | None = None
+    """The environment as loaded, with its robot and camera rows."""
 
 
 class RuntimeSession:
@@ -264,6 +266,11 @@ class RuntimeSession:
     @property
     def store(self) -> Store | None:
         return self._store
+
+    @property
+    def loaded_environment(self) -> LoadedEnvironment | None:
+        """The loaded environment, with its description and rows; ``None`` when none is loaded."""
+        return self._environment.value
 
     @property
     def leader(self) -> Robot | None:
@@ -411,6 +418,7 @@ class RuntimeSession:
                     environment=held,
                     state=description.session_environment(),
                     robot_type=environment.robots[0].robot.type,
+                    row=environment,
                 )
 
     @contextmanager
