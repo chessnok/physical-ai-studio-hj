@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import cv2
 import numpy as np
@@ -16,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from api.dependencies import get_runtime_session_registry
 from main import app
-from runtime_session import snapshot
+from runtime_session import snapshot, snapshot_index
 from runtime_session.environment import describe_environment
 from runtime_session.registry import RuntimeSessionRegistry
 from runtime_session.session import LoadedEnvironment
@@ -187,6 +189,7 @@ def test_state_json_says_what_was_measured_when(live, tmp_path) -> None:
     assert cameras["cam 0"]["realsense"] is None
     assert cameras["cam 0"]["depth"] is None
     assert state["warnings"] == []
+    assert (state["defective"], state["comment"]) == (False, "")
 
 
 def test_without_teleoperation_the_leader_is_not_read(live, tmp_path) -> None:
@@ -260,3 +263,194 @@ def test_the_api_without_a_live_session_says_so(client) -> None:
     assert response.status_code == 409
     assert response.json()["error_code"] == "no_live_session"
     assert "Open the environment" in response.json()["message"]
+
+
+# Labels and the CSV index.
+
+TRICKY_COMMENT = 'scratch, near "edge"\nsecond line; naïve ✓'
+
+
+def _csv(path: Path) -> list[dict[str, str]]:
+    return list(csv.DictReader(io.StringIO(path.read_text(encoding="utf-8"), newline="")))
+
+
+def test_a_snapshot_is_saved_with_its_label_and_indexed(live, tmp_path) -> None:
+    result = snapshot.write(snapshot.capture(live), tmp_path, defective=True, comment=TRICKY_COMMENT)
+
+    assert (result.defective, result.comment) == (True, TRICKY_COMMENT)
+    folder = Path(result.path)
+    state = json.loads((folder / "state.json").read_text())
+    assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
+    (row,) = _csv(folder.parent / snapshot_index.CSV_NAME)
+    assert row["snapshot_id"] == result.snapshot_id
+    assert (row["defective"], row["comment"]) == ("true", TRICKY_COMMENT)
+    assert row["captured_at_local"] == state["captured_at"]["local"]
+    assert row["captured_at_utc"] == state["captured_at"]["utc"]
+    assert row["environment_id"] == str(live.loaded_environment.row.id)
+    assert (row["session_id"], row["control_mode"]) == ("session-1", "teleop")
+    assert row["joint_names"] == "shoulder_pan.pos;gripper.pos"
+    assert (row["follower_joint_1"], row["follower_joint_2"], row["follower_joint_3"]) == ("12.5", "40.0", "")
+    assert (row["leader_joint_1"], row["leader_joint_2"]) == ("13.0", "41.5")
+    assert row["camera_names"] == "Cam 0;Top"
+    # Paths relative to the CSV that lead to the saved images.
+    for column in ("camera_1_color", "camera_2_color", "camera_2_depth", "camera_2_depth_preview"):
+        assert (folder.parent / row[column]).is_file(), column
+    assert row["camera_1_depth"] == ""
+    assert [item.comment for item in snapshot.list_snapshots(folder.parent)] == [TRICKY_COMMENT]
+
+
+def test_a_snapshot_is_saved_even_if_the_index_cannot_be_written(live, tmp_path, monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(snapshot_index, "append", fail)
+
+    result = snapshot.write(snapshot.capture(live), tmp_path)
+
+    assert (Path(result.path) / "state.json").is_file()
+    assert any("snapshots.csv" in warning for warning in result.warnings)
+    assert snapshot_index.ensure(Path(result.path).parent)  # the next check adds it
+
+
+@pytest.fixture
+def project(live) -> UUID:
+    """A project of its own for the live session, so that no other test's snapshots show up."""
+    live.project_id = uuid4()
+    return live.project_id
+
+
+def _url(project: UUID, suffix: str = "") -> str:
+    return f"/api/projects/{project}/state_snapshots{suffix}"
+
+
+def _download(client: TestClient, project: UUID, **params) -> list[dict[str, str]]:
+    response = client.get(_url(project, "/snapshots.csv"), params=params)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/csv; charset=utf-8"
+    assert response.headers["content-disposition"] == f'attachment; filename="state_snapshots_{project}.csv"'
+    reader = csv.DictReader(io.StringIO(response.content.decode("utf-8"), newline=""))
+    assert tuple(reader.fieldnames or ()) == snapshot_index.COLUMNS
+    return list(reader)
+
+
+def _capture(client: TestClient, live, project: UUID, **label) -> dict:
+    response = client.post(_url(project), params={"session_id": live.id}, json=label or None)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_the_api_captures_with_a_label_lists_it_and_indexes_it(client, live, project) -> None:
+    created = _capture(client, live, project, defective=True, comment=TRICKY_COMMENT)
+
+    assert (created["defective"], created["comment"]) == (True, TRICKY_COMMENT)
+    state = json.loads((Path(created["path"]) / "state.json").read_text())
+    assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
+    listed = client.get(_url(project)).json()
+    assert [(item["snapshot_id"], item["defective"], item["comment"]) for item in listed] == [
+        (created["snapshot_id"], True, TRICKY_COMMENT)
+    ]
+    rows = _download(client, project)
+    assert [(row["snapshot_id"], row["defective"], row["comment"]) for row in rows] == [
+        (created["snapshot_id"], "true", TRICKY_COMMENT)
+    ]
+
+
+def test_a_capture_without_a_label_is_good_and_has_no_comment(client, live, project) -> None:
+    created = _capture(client, live, project)
+
+    assert (created["defective"], created["comment"]) == (False, "")
+    (row,) = _download(client, project)
+    assert (row["defective"], row["comment"]) == ("false", "")
+
+
+def test_a_comment_is_trimmed_and_may_have_500_characters(client, live, project) -> None:
+    created = _capture(client, live, project, comment="  " + "é" * 500 + "\n")
+
+    assert created["comment"] == "é" * 500
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param({"comment": "x" * 501}, id="too long"),
+        pytest.param({"comment": 5}, id="not text"),
+        pytest.param({"comment": "a\x00b"}, id="NUL"),
+        pytest.param({"defective": "maybe"}, id="not a bool"),
+        pytest.param({"defect": True}, id="unknown field"),
+    ],
+)
+def test_the_api_refuses_a_bad_label_and_saves_nothing(client, live, project, label) -> None:
+    response = client.post(_url(project), params={"session_id": live.id}, json=label)
+
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "bad_request"
+    assert client.get(_url(project)).json() == []
+
+
+def test_the_api_changes_a_label_later(client, live, project) -> None:
+    first = _capture(client, live, project, comment="ok")
+    second = _capture(client, live, project, comment="untouched")
+
+    response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"defective": True})
+    assert response.status_code == 200
+    assert (response.json()["defective"], response.json()["comment"]) == (True, "ok")
+    response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"comment": f"  {TRICKY_COMMENT} "})
+    assert response.status_code == 200
+    assert (response.json()["defective"], response.json()["comment"]) == (True, TRICKY_COMMENT)
+
+    state = json.loads((Path(first["path"]) / "state.json").read_text())
+    assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
+    assert "label_updated_at" in state
+    assert state["robots"]["follower"]["joint_positions"] == {"shoulder_pan.pos": 12.5, "gripper.pos": 40.0}
+    labels = {row["snapshot_id"]: (row["defective"], row["comment"]) for row in _download(client, project)}
+    assert labels == {first["snapshot_id"]: ("true", TRICKY_COMMENT), second["snapshot_id"]: ("false", "untouched")}
+    listed = {item["snapshot_id"]: (item["defective"], item["comment"]) for item in client.get(_url(project)).json()}
+    assert listed == {first["snapshot_id"]: (True, TRICKY_COMMENT), second["snapshot_id"]: (False, "untouched")}
+
+    response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"defective": False, "comment": ""})
+    assert (response.json()["defective"], response.json()["comment"]) == (False, "")
+
+
+def test_a_label_change_needs_a_change_and_a_snapshot(client, live, project) -> None:
+    created = _capture(client, live, project)
+
+    for body in ({}, {"defective": None, "comment": None}, {"comment": "x" * 501}, {"defective": True, "x": 1}):
+        response = client.patch(_url(project, f"/{created['snapshot_id']}"), json=body)
+        assert response.status_code == 400, body
+    response = client.patch(_url(project, "/20261114-030000-999"), json={"defective": True})
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "state_snapshot_not_found"
+    response = client.patch(_url(uuid4(), f"/{created['snapshot_id']}"), json={"defective": True})
+    assert response.status_code == 404
+    response = client.patch(_url(project, "/not-a-snapshot"), json={"defective": True})
+    assert response.status_code == 400
+    assert not client.get(_url(project)).json()[0]["defective"]
+
+
+def test_the_csv_download_is_rebuilt_when_missing_or_damaged(client, live, project) -> None:
+    assert _download(client, project) == []  # a project without snapshots: the header only
+    first = _capture(client, live, project, defective=True)
+    second = _capture(client, live, project, comment="b, c")
+    index = Path(first["path"]).parent / snapshot_index.CSV_NAME
+
+    index.unlink()
+    assert [row["snapshot_id"] for row in _download(client, project)] == [first["snapshot_id"], second["snapshot_id"]]
+
+    index.write_bytes(index.read_bytes()[:-30])
+    rows = _download(client, project)
+    assert [(row["defective"], row["comment"]) for row in rows] == [("true", ""), ("false", "b, c")]
+
+    # Edited by hand: only an explicit rebuild picks that up, since the index still lists every snapshot.
+    state_path = Path(second["path"]) / "state.json"
+    state_path.write_text(json.dumps(json.loads(state_path.read_text()) | {"comment": "by hand"}))
+    assert _download(client, project)[1]["comment"] == "b, c"
+    assert _download(client, project, rebuild="true")[1]["comment"] == "by hand"
+
+
+def test_the_list_can_be_limited_to_the_newest(client, live, project) -> None:
+    created = [_capture(client, live, project, comment=str(index))["snapshot_id"] for index in range(3)]
+
+    listed = client.get(_url(project), params={"limit": 2}).json()
+
+    assert [item["snapshot_id"] for item in listed] == created[:0:-1]
+    assert client.get(_url(project), params={"limit": 0}).status_code == 400

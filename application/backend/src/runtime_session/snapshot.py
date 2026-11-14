@@ -6,7 +6,8 @@ a recording does, and writes it to ``<storage>/state_snapshots/<project>/<time>/
 
 - ``state.json``: when, which project, environment, robots and cameras; joint
   positions with the time each was measured; camera settings, and a RealSense's
-  intrinsics and depth scale as its publisher recorded them.
+  intrinsics and depth scale as its publisher recorded them; its label
+  (``defective``, ``comment``), which can be changed later.
 - ``<camera>.color.png``: the color image, lossless.
 - ``<camera>.depth.png`` (16-bit, millimetres, 0 = no depth) and
   ``<camera>.depth_preview.png`` (colorized) for a camera that records depth.
@@ -14,6 +15,9 @@ a recording does, and writes it to ``<storage>/state_snapshots/<project>/<time>/
 It never opens a device, sends a robot anything or reads a robot's bus: the
 leader's positions are known only while it teleoperates (they are the command
 the follower is sent), and servo ticks are derived from the calibration.
+
+Every snapshot also gets a row in the project's ``snapshots.csv``
+(:mod:`runtime_session.snapshot_index`).
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ import cv2
 import numpy as np
 from loguru import logger
 
+from runtime_session import snapshot_index
+from runtime_session.snapshot_index import STATE_FILE
 from runtime_session.store import ACTION, STATE, depth_key
 from schemas.state_snapshot import SnapshotCamera, StateSnapshot
 from utils.depth_colormap import colorize_depth
@@ -41,7 +47,6 @@ if TYPE_CHECKING:
     from schemas.project_camera import Camera
 
 FORMAT = "physicalai-studio/state-snapshot/v1"
-STATE_FILE = "state.json"
 
 
 @dataclass
@@ -103,8 +108,15 @@ def capture(session: RuntimeSession) -> Captured:
     )
 
 
-def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = None) -> StateSnapshot:
-    """Write a captured snapshot under ``root/<project>/<local time>/`` and describe it."""
+def write(
+    captured: Captured,
+    root: Path,
+    *,
+    build: Mapping[str, Any] | None = None,
+    defective: bool = False,
+    comment: str = "",
+) -> StateSnapshot:
+    """Write a captured snapshot under ``root/<project>/<local time>/``, index it, and describe it."""
     captured_at = datetime.fromtimestamp(captured.clock.wall).astimezone()
     folder = _new_folder(root / captured.project_id, captured_at)
     warnings: list[str] = []
@@ -134,6 +146,8 @@ def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = N
             "utc": captured_at.astimezone(UTC).isoformat(timespec="milliseconds"),
             "monotonic": captured.clock.monotonic,
         },
+        "defective": defective,
+        "comment": comment,
         "app": dict(build or {}),
         "project": {"id": captured.project_id, "name": captured.project_name},
         "session": {"id": captured.session_id, "control": captured.control, "dataset": captured.dataset},
@@ -147,8 +161,14 @@ def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = N
         "cameras": cameras,
         "warnings": warnings,
     }
-    (folder / STATE_FILE).write_text(json.dumps(document, indent=2, default=str))
+    snapshot_index.write_json(folder / STATE_FILE, document)
     logger.info("Saved state snapshot {}", folder)
+    shown_warnings = list(warnings)
+    try:
+        snapshot_index.append(folder.parent, document)
+    except OSError as error:  # the snapshot is saved; the index is rebuilt when it is next found stale
+        logger.exception("Could not add snapshot {} to {}", folder.name, snapshot_index.CSV_NAME)
+        shown_warnings.append(f"It is not in {snapshot_index.CSV_NAME} yet ({error}); downloading the CSV adds it.")
     return StateSnapshot(
         snapshot_id=folder.name,
         path=str(folder),
@@ -158,20 +178,46 @@ def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = N
         cameras=shown,
         follower=follower["joint_positions"] is not None,
         leader=leader is not None and leader["joint_positions"] is not None,
-        warnings=warnings,
+        warnings=shown_warnings,
+        defective=defective,
+        comment=comment,
     )
 
 
-def list_snapshots(project_root: Path) -> list[StateSnapshot]:
-    """The snapshots saved for a project, newest first; folders without a readable ``state.json`` are skipped."""
-    snapshots = []
-    for folder in sorted(project_root.iterdir(), reverse=True) if project_root.is_dir() else ():
+def list_snapshots(project_root: Path, limit: int | None = None) -> list[StateSnapshot]:
+    """The snapshots saved for a project, newest first, at most ``limit``.
+
+    Folders without a readable ``state.json`` are skipped.
+    """
+    snapshots: list[StateSnapshot] = []
+    if not project_root.is_dir():
+        return snapshots
+    for folder in sorted((path for path in project_root.iterdir() if path.is_dir()), reverse=True):
+        if limit is not None and len(snapshots) >= limit:
+            break
         try:
-            document = json.loads((folder / STATE_FILE).read_text())
+            document = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
             snapshots.append(_summary(folder, document))
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return snapshots
+
+
+def update_label(
+    project_root: Path, snapshot_id: str, *, defective: bool | None = None, comment: str | None = None
+) -> StateSnapshot:
+    """Change a saved snapshot's label in its ``state.json`` and in ``snapshots.csv``.
+
+    Raises:
+        FileNotFoundError: The project has no such snapshot.
+    """
+    changes: dict[str, Any] = {"label_updated_at": datetime.now(UTC).isoformat(timespec="milliseconds")}
+    if defective is not None:
+        changes["defective"] = defective
+    if comment is not None:
+        changes["comment"] = comment
+    document = snapshot_index.update(project_root, snapshot_id, changes)
+    return _summary(project_root / snapshot_id, document)
 
 
 def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
@@ -197,6 +243,8 @@ def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
         follower=(robots.get("follower") or {}).get("joint_positions") is not None,
         leader=leader.get("joint_positions") is not None,
         warnings=document.get("warnings", []),
+        defective=document.get("defective") is True,
+        comment=document.get("comment") or "",
     )
 
 
