@@ -6,12 +6,15 @@ filters per-driver kwargs so that only constructor-safe parameters reach the cam
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import json
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 from physicalai.capture import CameraType, ColorMode, SharedCamera
+from physicalai.capture.errors import CaptureTimeoutError
 from physicalai.config import Config
 
+from utils.camera_publishers import CameraPublishers, camera_publishers
 from utils.v4l2_frame_interval import fix_zero_frame_intervals
 
 if TYPE_CHECKING:
@@ -149,30 +152,68 @@ def driver_to_camera_type(driver: str) -> CameraType:
         raise ValueError(msg) from None
 
 
+def camera_device_key(config: Camera) -> str:
+    """What identifies a camera's physical device, whatever settings it is captured with."""
+    return f"{config.driver}:{json.dumps(config.fingerprint, sort_keys=True)}"
+
+
+class StudioSharedCamera(SharedCamera):
+    """A ``SharedCamera`` whose publisher Studio runs, with exactly the requested settings.
+
+    :meth:`connect` first has :class:`~utils.camera_publishers.CameraPublishers` make sure a
+    live publisher with this camera's recipe serves it: one with other settings is stopped
+    first (or refused, when ``replace_settings`` is off), and a dead one is replaced. A
+    publisher that is alive but delivers nothing within the timeout is replaced once.
+    """
+
+    device: str = ""
+    replace_settings: bool = True
+    publishers: CameraPublishers | None = None
+
+    def connect(self, timeout: float = 5.0) -> None:
+        if self.is_connected:
+            return
+        publishers = self.publishers or camera_publishers()
+        recipe = cast("Config", self._camera)
+        idle_timeout = self._idle_timeout
+        publishers.ensure(
+            self.device, self.service_name, recipe, idle_timeout=idle_timeout, replace=self.replace_settings
+        )
+        try:
+            super().connect(timeout)
+        except CaptureTimeoutError:
+            publishers.restart(self.device, self.service_name, recipe, idle_timeout=idle_timeout)
+            super().connect(timeout)
+
+
 def build_shared_camera(
     config: Camera,
     *,
     validate_on_connect: bool = False,
     overwrite_settings: bool = False,
     idle_timeout: float = 5.0,
+    publishers: CameraPublishers | None = None,
 ) -> SharedCamera:
     """Build a SharedCamera from a backend Camera schema.
+
+    Studio runs the camera's publisher itself (see :class:`StudioSharedCamera`), so the
+    publisher's in-place reconfigure is never used: it races the capture loop and can kill it.
 
     Args:
         config: Backend camera configuration (discriminated union).
         validate_on_connect: If ``True``, :meth:`~SharedCamera.connect` raises
-            :class:`~physicalai.capture.errors.CaptureError` when an
-            existing publisher's resolution does not match the requested
-            ``width``/``height``. Use ``False`` for preview streams
-            (tolerates mismatch) and ``True`` for recording / inference
-            when the initial attachment must match the requested config.
-        overwrite_settings: If ``True``, attempt to reconfigure the publisher
-            to match requested settings when a config mismatch is detected.
-            Requires a publisher that supports the control channel (v2+).
+            :class:`~physicalai.capture.errors.CaptureError` when the
+            publisher's frames do not have the requested ``width``/``height``/``fps``
+            (a publisher Studio did not start). Use ``False`` for preview streams
+            (tolerates mismatch) and ``True`` for recording / inference.
+        overwrite_settings: If ``True``, a publisher Studio runs for this camera with other
+            settings is stopped and replaced by one with these. If ``False``, connecting
+            fails instead.
         idle_timeout: Seconds with zero subscribers before the publisher
             self-exits.  Preview-class callers should use a short value
             (e.g. 0.5) for fast turnover on resolution changes;
             record-class callers should use a longer value (e.g. 5.0).
+        publishers: The publishers to run it with; this backend's by default.
 
     Returns:
         A configured (but not yet connected) SharedCamera instance.
@@ -188,11 +229,15 @@ def build_shared_camera(
     camera_config = build_capture_config(config)
     logger.debug(f"camera config for {config.name}: {camera_config}")
 
-    return SharedCamera(
+    camera = StudioSharedCamera(
         camera=camera_config,
         service_name=capture_service_name(config),
         color_mode=ColorMode.RGB,
         validate_on_connect=validate_on_connect,
-        overwrite_settings=overwrite_settings,
+        overwrite_settings=False,
         idle_timeout=idle_timeout,
     )
+    camera.device = camera_device_key(config)
+    camera.replace_settings = overwrite_settings
+    camera.publishers = publishers
+    return camera

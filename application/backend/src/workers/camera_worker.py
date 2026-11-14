@@ -113,7 +113,8 @@ class CameraWorker(ThreadWorker[SharedCamera]):
     def _open(self) -> SharedCamera:
         camera = build_shared_camera(
             config=self.config,
-            validate_on_connect=False,
+            # Recorded frames must have the configured settings: never attach to a publisher with others.
+            validate_on_connect=True,
             overwrite_settings=not self.is_locked,
         )
         camera.connect()

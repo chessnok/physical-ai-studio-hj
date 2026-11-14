@@ -19,6 +19,7 @@ from services.event_processor import EventProcessor
 from services.health_service import HealthService
 from services.remote_trainer_service import RemoteTrainerService
 from settings import get_settings
+from utils.camera_publishers import camera_publishers
 from utils.multiprocessing import ensure_spawn_start_method
 from utils.serial_robot_tools import RobotConnectionManager
 
@@ -103,6 +104,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     ensure_spawn_start_method()
     # No session is live yet, so any session block in shared memory is left over from a crash.
     sweep_stale_blocks()
+    # Likewise camera publishers: a killed backend leaves them holding their cameras.
+    await asyncio.to_thread(camera_publishers().sweep_orphans)
     app_scheduler = Scheduler()
     app_scheduler.start_workers()
 
@@ -132,6 +135,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # For now, we assume active workers unregistering will trigger releases.
 
     await app.state.runtime_session_registry.close_all()
+    # Release the cameras now, rather than leave publishers to notice they have no subscribers.
+    await asyncio.to_thread(camera_publishers().stop_all)
     # Keep draining worker events while shutdown waits for child processes to exit.
     await asyncio.to_thread(app_scheduler.shutdown)
     app.state.event_processor.shutdown()

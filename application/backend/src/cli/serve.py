@@ -9,6 +9,9 @@ from cli.database import _run_migrations
 from core.security import get_ssh_feature_availability
 from settings import get_settings
 
+GRACEFUL_SHUTDOWN_S = 10
+"""How long open connections get to finish when the server is asked to stop."""
+
 
 def _package_root() -> Path:
     return Path(__file__).resolve().parent.parent
@@ -44,7 +47,11 @@ def start_server(host: str, port: int) -> None:
     from utils.multiprocessing import ensure_spawn_start_method
 
     ensure_spawn_start_method()
-    uvicorn.run("main:app", host=host, port=port)
+    # Without a timeout uvicorn waits for every open connection's task on SIGTERM, forever if one
+    # never ends, and only a second Ctrl+C forces it: SIGTERM looked ignored, and a SIGKILL then
+    # left camera publishers behind. After the timeout the tasks are cancelled and the
+    # application still shuts down: sessions close and camera publishers are stopped.
+    uvicorn.run("main:app", host=host, port=port, timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S)
 
 
 @click.command()

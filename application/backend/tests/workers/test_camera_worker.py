@@ -63,14 +63,14 @@ class TestCameraWorker:
                 mock_cam.disconnect.assert_not_called()
 
             _enter_and_leave(worker, check)
-            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=True)
+            mock_build.assert_called_once_with(config=config, validate_on_connect=True, overwrite_settings=True)
             mock_cam.disconnect.assert_called_once()
 
     def test_a_locked_camera_keeps_its_settings(self, store):
         config = _make_config()
         with patch("workers.camera_worker.build_shared_camera") as mock_build:
             _enter_and_leave(CameraWorker(config, store, "cam", is_locked=True))
-            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=False)
+            mock_build.assert_called_once_with(config=config, validate_on_connect=True, overwrite_settings=False)
 
     def test_lifecycle_skips_disconnect_if_not_connected(self, store):
         with patch("workers.camera_worker.build_shared_camera") as mock_build:

@@ -74,3 +74,18 @@ def test_start_server_reconciles_settings_host_with_the_actual_bind_argument(mon
 
     assert settings_module.get_settings().host == "0.0.0.0"
     assert settings_module.get_settings().port == 9999
+
+
+def test_sigterm_cannot_wait_forever_on_a_connection(monkeypatch) -> None:
+    """uvicorn waits for every connection's task on SIGTERM; without a timeout one that never ends blocks it."""
+    monkeypatch.setattr(serve_module, "_configure_packaged_runtime", lambda: None)
+    monkeypatch.setattr(serve_module, "_run_migrations", lambda: None)
+
+    import uvicorn
+
+    calls = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append(kwargs))
+
+    serve_module.start_server("127.0.0.1", 7860)
+
+    assert calls[0]["timeout_graceful_shutdown"] == serve_module.GRACEFUL_SHUTDOWN_S

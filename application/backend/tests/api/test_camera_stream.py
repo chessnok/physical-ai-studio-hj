@@ -112,3 +112,66 @@ def test_a_realsense_preview_shows_color_or_else_colorized_depth() -> None:
         shown = encode.call_args.args[0]
         assert shown.shape == (4, 6, 3)
         assert shown.dtype == np.uint8
+
+
+def _frozen_camera() -> MagicMock:
+    """A camera whose publisher stopped delivering: ``read_latest`` keeps returning one frame."""
+    import numpy as np
+
+    frame = MagicMock()
+    frame.data = np.zeros((4, 4, 3), np.uint8)
+    frame.sequence = 1
+    camera = MagicMock()
+    camera.read_latest.return_value = frame
+    return camera
+
+
+def test_a_preview_ends_when_its_socket_closes_even_if_the_camera_sends_nothing() -> None:
+    client = _client(CameraClaimRegistry())
+    try:
+        with (
+            patch("api.camera.build_shared_camera") as build,
+            patch("api.camera._PREVIEW_STALL_S", 60.0),
+            patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg"),
+        ):
+            build.return_value = _frozen_camera()
+            with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}") as websocket:
+                assert websocket.receive_bytes() == b"jpeg"
+            # Leaving the block closes the socket; the test client waits for the handler to end.
+            build.return_value.disconnect.assert_called_once()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_a_stalled_camera_is_reported_so_the_preview_reconnects() -> None:
+    client = _client(CameraClaimRegistry())
+    try:
+        with (
+            patch("api.camera.build_shared_camera") as build,
+            patch("api.camera._PREVIEW_STALL_S", 0.1),
+            patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg"),
+        ):
+            build.return_value = _frozen_camera()
+            with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}") as websocket:
+                assert websocket.receive_bytes() == b"jpeg"
+                error = websocket.receive_json()
+            assert error["error_code"] == "camera_unavailable"
+            assert "stopped sending frames" in error["message"]
+            build.return_value.disconnect.assert_called_once()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_a_camera_that_cannot_open_says_why() -> None:
+    from utils.realsense_rgbd import RealSenseModeError
+
+    client = _client(CameraClaimRegistry())
+    try:
+        with patch("api.camera.build_shared_camera") as build:
+            build.return_value.connect.side_effect = RealSenseModeError("no color mode 1280x720@30fps. ... USB 2.1")
+            with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}") as websocket:
+                error = websocket.receive_json()
+        assert error["error_code"] == "camera_unavailable"
+        assert "USB 2.1" in error["message"]
+    finally:
+        app.dependency_overrides.clear()
