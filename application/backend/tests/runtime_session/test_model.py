@@ -155,3 +155,11 @@ def test_the_models_actions_are_due_at_the_end_of_the_grace_period() -> None:
         control.on_stop()
     finally:
         store.unlink()
+
+
+def test_a_single_image_policy_reads_the_first_color_camera_never_a_depth_map(tmp_path: Path) -> None:
+    spec = FeatureSpec(
+        ("shoulder_pan.pos", "gripper.pos"),
+        {"a_depth": ImageSpec.depth(60, 80), "b": ImageSpec(120, 160, 3)},  # sorted: the depth map first
+    )
+    assert model_inputs(_export(tmp_path / "a", cameras=("images",)), spec).images == {"images": "b"}

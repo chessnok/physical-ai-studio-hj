@@ -67,7 +67,9 @@ def model_inputs(export_dir: Path, spec: FeatureSpec) -> ModelInputs:
             if state_size != len(spec.joint_names):
                 reasons.append(f"it takes {state_size} joints, the follower has {len(spec.joint_names)}")
         elif feature["ftype"] == "VISUAL":
-            camera = name.removeprefix(f"{_IMAGES}.") if name != _IMAGES else next(iter(spec.observations), "")
+            # A policy with a single unnamed image reads the first color camera, never a depth map.
+            first_color = next((key for key, image in spec.observations.items() if not image.is_depth), "")
+            camera = name.removeprefix(f"{_IMAGES}.") if name != _IMAGES else first_color
             # shortcut: checks the camera is there, not its resolution; the export may resize. Compare once manifests
             # say what they resize from.
             if camera not in spec.observations:
